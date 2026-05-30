@@ -152,7 +152,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
       setState({
         columnMap: { frequency, real_z, imag_z, negate_imag, characterization },
         charUnits: newCharUnits,
-        maxStep: Math.max(getState().maxStep, 3),
+        maxStep: Math.max(getState().maxStep, 4),
       });
       navigate(3);
     });
