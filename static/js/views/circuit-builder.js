@@ -621,12 +621,12 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
         if (e.key === 'Enter') container.querySelector('#apply-str-btn').click();
       });
 
-      container.querySelector('#back-btn').addEventListener('click', () => navigate(2));
+      container.querySelector('#back-btn').addEventListener('click', () => navigate(3));
       container.querySelector('#next-btn').addEventListener('click', () => {
         const str = treeToString(nodes);
         if (!str) { showToast('Build a circuit first.', 'error'); return; }
-        setState({ circuitTree: { nodes }, circuitString: str, maxStep: Math.max(getState().maxStep, 4) });
-        navigate(4);
+        setState({ circuitTree: { nodes }, circuitString: str, maxStep: Math.max(getState().maxStep, 5) });
+        navigate(5);
       });
 
       if (!history.length) saveHistory();
