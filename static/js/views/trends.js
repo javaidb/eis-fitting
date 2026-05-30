@@ -116,10 +116,19 @@ export function TrendsView(container, { navigate, showToast }) {
     function paramInfo(name) {
       if (/^R\d/.test(name))           return { scale: 1000, unit: 'mΩ' };
       if (/^C\d/.test(name))           return { scale: 1,    unit: 'F' };
-      if (/^CPE\d+_0/.test(name))      return { scale: 1,    unit: 'Ω⁻¹·sⁿ' };
-      if (/^CPE\d+_1/.test(name))      return { scale: 1,    unit: '' };
       if (/^L\d/.test(name))           return { scale: 1,    unit: 'H' };
-      return                                  { scale: 1,    unit: '' };
+      if (/^CPE\d+_0/.test(name))      return { scale: 1,    unit: 'Ω⁻¹·sⁿ' };
+      if (/^CPE\d+_1/.test(name))      return { scale: 1,    unit: '-' };
+      if (/^W\d+(_0)?$/.test(name))    return { scale: 1,    unit: 'Ω·s½' };
+      if (/^Wo\d+_0/.test(name))       return { scale: 1000, unit: 'mΩ' };
+      if (/^Wo\d+_1/.test(name))       return { scale: 1,    unit: 's' };
+      if (/^Wo\d+_2/.test(name))       return { scale: 1,    unit: '-' };
+      if (/^Ws\d+_0/.test(name))       return { scale: 1000, unit: 'mΩ' };
+      if (/^Ws\d+_1/.test(name))       return { scale: 1,    unit: 's' };
+      if (/^Ws\d+_2/.test(name))       return { scale: 1,    unit: '-' };
+      if (/^La\d+_0/.test(name))       return { scale: 1,    unit: 'H' };
+      if (/^La\d+_1/.test(name))       return { scale: 1000, unit: 'mΩ' };
+      return                                   { scale: 1,    unit: '' };
     }
 
     function defaultXUnit(label) {
@@ -209,27 +218,29 @@ export function TrendsView(container, { navigate, showToast }) {
             mode: 'markers+lines',
             name,
             marker: { color, size: 7 },
-            line:   { color, width: 1.5, dash: 'dash' },
+            line:   { color, width: 1.5, dash: '4px,4px', shape: 'spline', smoothing: 0.6 },
             legendgroup: key,
             showlegend:  true,
           });
         }
 
-        // Dashed mean trend line
-        const meanX = sortedX;
-        const meanY = sortedX.map(x => {
-          const ys = xBins[x];
-          return ys.reduce((s, v) => s + v, 0) / ys.length;
-        });
-        traces.push({
-          x: meanX, y: meanY,
-          type: 'scatter',
-          mode: 'lines',
-          name: `${name} mean`,
-          line: { color, width: 1.5, dash: 'dash' },
-          legendgroup: key,
-          showlegend:  false,
-        });
+        // Dashed mean trend line — only needed in box mode; scatter mode already draws it
+        if (useBox) {
+          const meanX = sortedX;
+          const meanY = sortedX.map(x => {
+            const ys = xBins[x];
+            return ys.reduce((s, v) => s + v, 0) / ys.length;
+          });
+          traces.push({
+            x: meanX, y: meanY,
+            type: 'scatter',
+            mode: 'lines',
+            name: `${name} mean`,
+            line: { color, width: 1.5, dash: '4px,4px', shape: 'spline', smoothing: 0.6 },
+            legendgroup: key,
+            showlegend:  false,
+          });
+        }
       }
 
       const layout = {
