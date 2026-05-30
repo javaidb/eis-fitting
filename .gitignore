@@ -217,5 +217,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# EIS data
-data/
+# EIS data -- ignore data/ contents but allow specific subdirs to be tracked
+data/*
+!data/mendeley_sample_01_reformatted
+!data/mendeley_sample_01_reformatted/**
