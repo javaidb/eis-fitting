@@ -538,6 +538,39 @@ select option { background: var(--surface2); }
 .params-summary span { color: var(--text); font-weight: 600; margin-right: 8px; }
 
 /* ───────────────────────────────────────────
+   DRT table
+─────────────────────────────────────────── */
+.drt-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+  background: var(--surface);
+  border-radius: var(--radius);
+}
+.drt-table th,
+.drt-table td {
+  padding: 6px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.drt-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface2);
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  box-shadow: 0 1px 0 var(--border);
+}
+.drt-table tbody tr:last-child td { border-bottom: none; }
+.drt-table tbody tr:hover { background: var(--surface2); }
+
+/* ───────────────────────────────────────────
    Trends
 ─────────────────────────────────────────── */
 .trends-controls {
