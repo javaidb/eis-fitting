@@ -84,9 +84,14 @@ async def fit_batch_stream(request: FitRequest) -> AsyncGenerator[str, None]:
             frequencies, Z, char_values = await asyncio.to_thread(
                 load_eis_data, file_info.path, request.column_map
             )
-            result = await asyncio.to_thread(
-                fit_single, frequencies, Z, request.circuit_config, char_values, file_info.filename
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    fit_single, frequencies, Z, request.circuit_config, char_values, file_info.filename
+                ),
+                timeout=request.fit_timeout,
             )
+        except asyncio.TimeoutError:
+            result = FitResult(filename=file_info.filename, success=False, error=f"Fit timed out after {request.fit_timeout:g} s")
         except Exception as exc:
             result = FitResult(filename=file_info.filename, success=False, error=str(exc))
 
