@@ -4,12 +4,21 @@ import { streamFitting } from '../api.js';
 const GOOD_THRESHOLD = 0.05;  // residual < 5% → good fit badge
 
 function paramUnitInfo(name) {
-  if (/^R\d/.test(name))       return { scale: 1000, unit: 'mΩ' };
-  if (/^C\d/.test(name))       return { scale: 1,    unit: 'F' };
-  if (/^CPE\d+_0/.test(name))  return { scale: 1,    unit: 'Ω⁻¹·sⁿ' };
-  if (/^CPE\d+_1/.test(name))  return { scale: 1,    unit: '' };
-  if (/^L\d/.test(name))       return { scale: 1,    unit: 'H' };
-  return                               { scale: 1,    unit: '' };
+  if (/^R\d/.test(name))          return { scale: 1000, unit: 'mΩ' };
+  if (/^C\d/.test(name))          return { scale: 1,    unit: 'F' };
+  if (/^L\d/.test(name))          return { scale: 1,    unit: 'H' };
+  if (/^CPE\d+_0/.test(name))     return { scale: 1,    unit: 'Ω⁻¹·sⁿ' };
+  if (/^CPE\d+_1/.test(name))     return { scale: 1,    unit: '-' };        // n: dimensionless
+  if (/^W\d+(_0)?$/.test(name))   return { scale: 1,    unit: 'Ω·s½' };    // Warburg σ
+  if (/^Wo\d+_0/.test(name))      return { scale: 1000, unit: 'mΩ' };      // Wo resistance
+  if (/^Wo\d+_1/.test(name))      return { scale: 1,    unit: 's' };        // Wo time constant
+  if (/^Wo\d+_2/.test(name))      return { scale: 1,    unit: '-' };        // Wo exponent
+  if (/^Ws\d+_0/.test(name))      return { scale: 1000, unit: 'mΩ' };      // Ws resistance
+  if (/^Ws\d+_1/.test(name))      return { scale: 1,    unit: 's' };        // Ws time constant
+  if (/^Ws\d+_2/.test(name))      return { scale: 1,    unit: '-' };        // Ws exponent
+  if (/^La\d+_0/.test(name))      return { scale: 1,    unit: 'H' };        // bounded inductance
+  if (/^La\d+_1/.test(name))      return { scale: 1000, unit: 'mΩ' };      // bounded inductance R
+  return                                  { scale: 1,    unit: '' };
 }
 
 function configKey(state) {
