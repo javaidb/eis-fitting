@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EIS Fitting</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" defer></script>
+</head>
+<body>
+
+<header class="app-header">
+  <div class="header-brand">
+    <span class="brand-icon">⚡</span>
+    <span class="brand-name">EIS Fitting</span>
+  </div>
+  <nav class="step-nav" id="step-nav">
+    <button class="step-btn active" data-step="1">
+      <span class="step-num">1</span>
+      <span class="step-label">Load Files</span>
+    </button>
+    <div class="step-connector"></div>
+    <button class="step-btn" data-step="2" disabled>
+      <span class="step-num">2</span>
+      <span class="step-label">Map Columns</span>
+    </button>
+    <div class="step-connector"></div>
+    <button class="step-btn" data-step="3" disabled>
+      <span class="step-num">3</span>
+      <span class="step-label">Build Circuit</span>
+    </button>
+    <div class="step-connector"></div>
+    <button class="step-btn" data-step="4" disabled>
+      <span class="step-num">4</span>
+      <span class="step-label">Set Bounds</span>
+    </button>
+    <div class="step-connector"></div>
+    <button class="step-btn" data-step="5" disabled>
+      <span class="step-num">5</span>
+      <span class="step-label">Fit</span>
+    </button>
+    <div class="step-connector"></div>
+    <button class="step-btn" data-step="6" disabled>
+      <span class="step-num">6</span>
+      <span class="step-label">Trends</span>
+    </button>
+  </nav>
+</header>
+
+<main class="app-main">
+  <div class="view active" id="view-1"></div>
+  <div class="view"        id="view-2"></div>
+  <div class="view"        id="view-3"></div>
+  <div class="view"        id="view-4"></div>
+  <div class="view"        id="view-5"></div>
+  <div class="view"        id="view-6"></div>
+</main>
+
+<div class="toast-container" id="toast-container"></div>
+
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>
