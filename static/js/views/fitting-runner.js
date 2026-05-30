@@ -75,8 +75,8 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       </div>
     `;
 
-    container.querySelector('#back-btn').addEventListener('click', () => navigate(4));
-    container.querySelector('#next-btn').addEventListener('click', () => navigate(6));
+    container.querySelector('#back-btn').addEventListener('click', () => navigate(5));
+    container.querySelector('#next-btn').addEventListener('click', () => navigate(7));
     container.querySelector('#run-btn').addEventListener('click', runFitting);
     container.querySelector('#clear-cache-link')?.addEventListener('click', e => { e.preventDefault(); runFitting(); });
   }
@@ -139,7 +139,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       setState({
         fitResults:   results,
         fitCacheKey:  completed ? configKey(getState()) : null,
-        maxStep:      Math.max(state.maxStep, 6),
+        maxStep:      Math.max(state.maxStep, 7),
       });
     }
   }
