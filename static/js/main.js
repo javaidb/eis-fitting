@@ -1,6 +1,7 @@
 import { getState, setState, subscribe } from './state.js';
 import { FileLoaderView }    from './views/file-loader.js';
 import { ColumnMapperView }  from './views/column-mapper.js';
+import { DRTView }           from './views/drt-viewer.js';
 import { CircuitBuilderView } from './views/circuit-builder.js';
 import { BoundsEditorView }  from './views/bounds-editor.js';
 import { FittingRunnerView } from './views/fitting-runner.js';
@@ -20,10 +21,11 @@ export function showToast(message, type = 'info') {
 const VIEWS = [
   { step: 1, el: document.getElementById('view-1'), factory: FileLoaderView },
   { step: 2, el: document.getElementById('view-2'), factory: ColumnMapperView },
-  { step: 3, el: document.getElementById('view-3'), factory: CircuitBuilderView },
-  { step: 4, el: document.getElementById('view-4'), factory: BoundsEditorView },
-  { step: 5, el: document.getElementById('view-5'), factory: FittingRunnerView },
-  { step: 6, el: document.getElementById('view-6'), factory: TrendsView },
+  { step: 3, el: document.getElementById('view-3'), factory: DRTView },
+  { step: 4, el: document.getElementById('view-4'), factory: CircuitBuilderView },
+  { step: 5, el: document.getElementById('view-5'), factory: BoundsEditorView },
+  { step: 6, el: document.getElementById('view-6'), factory: FittingRunnerView },
+  { step: 7, el: document.getElementById('view-7'), factory: TrendsView },
 ];
 
 const instances = {};
