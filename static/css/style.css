@@ -458,6 +458,20 @@ select option { background: var(--surface2); }
 /* ───────────────────────────────────────────
    Fitting runner
 ─────────────────────────────────────────── */
+.cache-banner {
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  margin-bottom: 12px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--text-muted);
+}
+.cache-banner a { color: var(--accent); }
+.cache-banner.stale {
+  background: color-mix(in srgb, var(--warning, #e67e22) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning, #e67e22) 35%, transparent);
+}
 .fitting-status {
   display: flex;
   flex-direction: column;
@@ -527,14 +541,13 @@ select option { background: var(--surface2); }
 .trends-controls .col { flex: 0 0 200px; }
 .trend-plots-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+  gap: 20px;
 }
 .trend-plot-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
   padding-bottom: 8px;
 }
 .trend-plot-title {
@@ -543,7 +556,7 @@ select option { background: var(--surface2); }
   font-weight: 700;
   color: var(--text-muted);
 }
-.trend-plot { height: 220px; }
+.trend-plot { height: 350px; }
 .export-btn-row { display: flex; justify-content: flex-end; margin-bottom: 12px; }
 
 /* ───────────────────────────────────────────
