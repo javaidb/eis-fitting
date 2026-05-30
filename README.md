@@ -114,37 +114,101 @@ Click **Run Fitting**. Each file is fitted in sequence using `scipy.optimize.lea
 
 After all fits complete, explore how the extracted parameters vary across your characterisation space:
 
-- Choose any characterisation variable (temperature, voltage, …) as the X axis
+- Choose any characterisation variable (temperature, voltage, SOC, …) as the X axis — battery ID is always used as the colour grouping so different cells are distinguishable at a glance
 - Multi-select any combination of fitted parameters for the Y axis
-- Optionally group by a second characterisation variable, displayed as colour-coded series
-- Error bars reflect the confidence intervals returned by the fitting
+- When multiple spectra share the same X value (e.g. repeated measurements), the data is shown as **box-and-whisker plots** with a dashed mean trend line; toggle to **mean-only** view using the checkbox in the controls bar
+- Axis labels include units automatically: R elements display in mΩ, C in F, temperature in °C, SOC in %, voltage in V — overridable per variable in the column mapper
 - **Export CSV** downloads the full results table (filename, all characterisation values, all parameter values)
 
 ---
 
-## CSV format
+## Data format requirements
 
-Any CSV with consistent column headers works. A typical file looks like:
+### Directory structure
+
+Organise your data with **one subfolder per battery cell**. Inside each subfolder, place **one CSV file per unique measurement condition** (temperature × SOC × voltage, etc.) — no further nesting.
 
 ```
-freq_Hz,Zreal_ohm,Zimag_ohm,temperature_C,voltage_V
-100000,0.00812,-0.00031,25,3.9
+my_dataset/
+├── cell_01/
+│   ├── T25C_V3p7V.csv
+│   ├── T25C_V3p9V.csv
+│   └── ...
+├── cell_02/
+│   ├── T25C_V3p7V.csv
+│   └── ...
+└── cell_03/
+    └── ...
+```
+
+Point the app at the **dataset root** (`my_dataset/`) and it will scan all battery subfolders automatically.
+
+> **Battery ID** is derived automatically from the trailing number in the subfolder name — `cell_01` → 1, `battery_03` → 3. You do not need a `battery_id` column in your CSVs.
+
+---
+
+### CSV columns
+
+Each CSV must contain exactly one EIS spectrum (rows = frequency points).
+
+#### Required columns
+
+| Column | Description |
+|--------|-------------|
+| Frequency | Measurement frequency in Hz — must be > 0 |
+| Real impedance Z′ | Real part of complex impedance (Ω) |
+| Imaginary impedance Z″ | Imaginary part of complex impedance (Ω) |
+
+Column names are matched by pattern, not exact string, so `freq_Hz`, `frequency`, `Frequency (Hz)` all work for frequency; `Zreal`, `impedance_real`, `Re(Z)` all work for real impedance, and so on.
+
+#### Condition columns (optional but recommended)
+
+Any additional columns that describe the measurement condition — temperature, state of charge, voltage, cycle number, etc. — can be mapped in Step 2 as characterisation variables. Their values must be **constant within a single file** (every row the same) since only the first row's value is read.
+
+```
+frequency_hz,impedance_real,impedance_imag,temperature_c,soc
+0.05,0.1109,-0.0054,25,100
+0.10,0.1097,-0.0036,25,100
 ...
-0.01,15.89,-15.65,25,3.9
+1000.0,0.0796,-0.0040,25,100
 ```
 
-Characterisation values (temperature, voltage, etc.) are read from the first data row of each file, so they should be constant within a single EIS run.
+#### Auto-detected column roles
 
-### Generate sample data
+The app auto-detects the following roles when you load a folder:
 
-The repository includes a script that produces 20 synthetic files (5 temperatures × 4 voltages) using a `R0-p(R1,C1)-W0` circuit with Arrhenius temperature dependence and a parabolic voltage dependence on R1:
+| Role | Matched patterns (case-insensitive) |
+|------|--------------------------------------|
+| Frequency | `freq`, `hz`, `frequency` |
+| Real Z | `zreal`, `z_re`, `impedance_real`, `real` |
+| Imaginary Z | `zimag`, `z_im`, `impedance_imag`, `imag` |
+| Temperature | `temp`, `celsius`, `kelvin`, `degc` |
+| Voltage | `volt`, `voltage`, `_v`, `^v` |
+| SOC | `soc`, `state of charge` |
 
-```bash
-python generate_samples.py
-# writes to data/sample_eis/
-```
+If your column names aren't recognised, assign them manually in the column mapper (Step 2).
 
-Use `data/sample_eis` as the folder path in step 1 and `R0-p(R1,C1)-W0` as the circuit in step 3 to verify the full workflow end-to-end.
+#### Negate Z″
+
+If your dataset stores the imaginary part as a positive number (i.e. −Z″ is stored), enable the **Negate Z″** toggle in the column mapper. The app will flip the sign before fitting.
+
+---
+
+### Included sample data
+
+`data/sample_eis/cell_01/` contains 20 ready-to-use spectra (5 temperatures × 4 voltages).
+
+| Column | Unit |
+|--------|------|
+| `frequency_hz` | Hz |
+| `impedance_real` | Ω |
+| `impedance_imag` | Ω |
+| `temperature_c` | °C |
+| `voltage_v` | V |
+
+Use `data/sample_eis` as the folder path in Step 1 and `R0-p(R1,C1)-W0` as the circuit in Step 3 to walk through the full workflow end-to-end.
+
+`data/mendeley_sample_01_reformatted/` contains real battery EIS data from a public Mendeley dataset, reformatted into the required directory structure (4 battery cells, 60 spectra each across temperatures 3–9 and SOC 10–100 %).
 
 ---
 
