@@ -85,7 +85,9 @@ def load_eis_data(
 
     Z = z_real + 1j * z_imag
 
-    mask = frequencies > 0
+    # Drop non-positive frequencies and inductive artifacts (Z.imag > 0
+    # means the point dips below the real axis on a Nyquist plot).
+    mask = (frequencies > 0) & (Z.imag <= 0)
     frequencies = frequencies[mask]
     Z = Z[mask]
 
