@@ -2,8 +2,16 @@ import { getState, setState } from '../state.js';
 
 export function ColumnMapperView(container, { navigate, showToast }) {
 
+  function defaultUnit(label) {
+    const l = (label || '').toLowerCase();
+    if (/temp/.test(l))                       return '°C';
+    if (/\bsoc\b|state.of.charge/.test(l))    return '%';
+    if (/volt|^v$|_v$/.test(l))               return 'V';
+    return '';
+  }
+
   function render() {
-    const { files, detectedRoles, columnMap } = getState();
+    const { files, detectedRoles, columnMap, charUnits } = getState();
     if (!files?.length) {
       container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📂</div><div>Load files first.</div></div>';
       return;
@@ -20,11 +28,14 @@ export function ColumnMapperView(container, { navigate, showToast }) {
 
     const roles  = detectedRoles || {};
     const cm     = columnMap || {};
+    const savedUnits = charUnits || {};
     const charParams = cm.characterization
-      ? Object.entries(cm.characterization).map(([label, col]) => ({ label, col }))
+      ? Object.entries(cm.characterization).map(([label, col]) => ({
+          label, col, unit: savedUnits[label] ?? defaultUnit(label),
+        }))
       : [];
 
-    // Pre-fill auto-detected + add temperature/voltage as defaults if present
+    // Pre-fill auto-detected + add temperature/voltage/soc as defaults if present
     const freq   = cm.frequency   || roles.frequency   || '';
     const realZ  = cm.real_z      || roles.real_z      || '';
     const imagZ  = cm.imag_z      || roles.imag_z      || '';
@@ -32,8 +43,9 @@ export function ColumnMapperView(container, { navigate, showToast }) {
 
     const defaultCharEntries = [];
     if (charParams.length === 0) {
-      if (roles.temperature) defaultCharEntries.push({ label: 'Temperature', col: roles.temperature });
-      if (roles.voltage)     defaultCharEntries.push({ label: 'Voltage',     col: roles.voltage });
+      if (roles.temperature) defaultCharEntries.push({ label: 'Temperature', col: roles.temperature, unit: '°C' });
+      if (roles.voltage)     defaultCharEntries.push({ label: 'Voltage',     col: roles.voltage,     unit: 'V'  });
+      if (roles.soc)         defaultCharEntries.push({ label: 'SOC',         col: roles.soc,         unit: '%'  });
     }
     const charEntries = charParams.length ? charParams : defaultCharEntries;
 
@@ -85,7 +97,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
           These are the variables that vary between files (e.g. temperature, voltage, SOC). Each row is one variable.
         </div>
         <div class="char-params-list" id="char-params-list">
-          ${charEntries.map((e, i) => charParamRow(i, e.label, e.col, allCols)).join('')}
+          ${charEntries.map((e, i) => charParamRow(i, e.label, e.col, allCols, e.unit ?? '')).join('')}
         </div>
         <button class="btn btn-secondary btn-sm" id="add-char-btn" style="margin-top:10px;">+ Add Parameter</button>
       </div>
@@ -104,7 +116,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
       const row = document.createElement('div');
       row.innerHTML = charParamRow(charCount++, '', '', allCols);
       row.className = '';
-      list.insertAdjacentHTML('beforeend', charParamRow(charCount - 1, '', '', allCols));
+      list.insertAdjacentHTML('beforeend', charParamRow(charCount - 1, '', '', allCols, ''));
       attachRemoveListeners();
     });
 
@@ -125,16 +137,21 @@ export function ColumnMapperView(container, { navigate, showToast }) {
 
       const charRows = container.querySelectorAll('.char-param-row');
       const characterization = {};
+      const newCharUnits = {};
       charRows.forEach(row => {
         const labelEl = row.querySelector('.char-label');
         const colEl   = row.querySelector('.char-col');
+        const unitEl  = row.querySelector('.char-unit');
         if (labelEl && colEl && labelEl.value.trim() && colEl.value) {
-          characterization[labelEl.value.trim()] = colEl.value;
+          const lbl = labelEl.value.trim();
+          characterization[lbl] = colEl.value;
+          if (unitEl?.value.trim()) newCharUnits[lbl] = unitEl.value.trim();
         }
       });
 
       setState({
         columnMap: { frequency, real_z, imag_z, negate_imag, characterization },
+        charUnits: newCharUnits,
         maxStep: Math.max(getState().maxStep, 3),
       });
       navigate(3);
@@ -147,7 +164,8 @@ export function ColumnMapperView(container, { navigate, showToast }) {
     }
   }
 
-  function charParamRow(i, label, col, allCols) {
+  function charParamRow(i, label, col, allCols, unit = '') {
+    const autoUnit = unit || defaultUnit(label);
     return `
       <div class="char-param-row">
         <input type="text" class="char-label" placeholder="Label (e.g. Temperature)" value="${label}">
@@ -155,6 +173,8 @@ export function ColumnMapperView(container, { navigate, showToast }) {
           <option value="">— column —</option>
           ${allCols.map(c => `<option value="${c}" ${c === col ? 'selected' : ''}>${c}</option>`).join('')}
         </select>
+        <input type="text" class="char-unit" placeholder="unit" value="${autoUnit}"
+               style="width:56px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;text-align:center;">
         <button class="btn btn-icon btn-ghost char-remove-btn" title="Remove">✕</button>
       </div>`;
   }
