@@ -58,3 +58,19 @@ class FitResult(BaseModel):
 
 class ParseCircuitRequest(BaseModel):
     circuit_string: str
+
+
+class DRTRequest(BaseModel):
+    files: List[FileInfo]
+    column_map: ColumnMap
+    lambda_reg: float = 1e-3
+
+
+class DRTResult(BaseModel):
+    filename: str = ""
+    success: bool = False
+    error: Optional[str] = None
+    log_tau: List[float] = []
+    gamma: List[float] = []
+    peaks: List[dict] = []
+    characterization: Dict[str, float] = {}
