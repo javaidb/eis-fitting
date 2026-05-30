@@ -13,6 +13,8 @@ const _defaults = {
   circuitString: '',
   circuitConfig: null,
   fitResults: [],
+  fitCacheKey: null,
+  charUnits: {},
   fitting: false,
 };
 
