@@ -39,6 +39,7 @@ class FitRequest(BaseModel):
     files: List[FileInfo]
     column_map: ColumnMap
     circuit_config: CircuitConfig
+    fit_timeout: float = 60.0
 
 
 class FitResult(BaseModel):
