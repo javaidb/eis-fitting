@@ -3,11 +3,30 @@ import { streamFitting } from '../api.js';
 
 const GOOD_THRESHOLD = 0.05;  // residual < 5% → good fit badge
 
+function paramUnitInfo(name) {
+  if (/^R\d/.test(name))       return { scale: 1000, unit: 'mΩ' };
+  if (/^C\d/.test(name))       return { scale: 1,    unit: 'F' };
+  if (/^CPE\d+_0/.test(name))  return { scale: 1,    unit: 'Ω⁻¹·sⁿ' };
+  if (/^CPE\d+_1/.test(name))  return { scale: 1,    unit: '' };
+  if (/^L\d/.test(name))       return { scale: 1,    unit: 'H' };
+  return                               { scale: 1,    unit: '' };
+}
+
+function configKey(state) {
+  return JSON.stringify({
+    files:   (state.files || []).map(f => f.path),
+    col:     state.columnMap,
+    circuit: state.circuitConfig,
+    timeout: state.fitTimeout ?? 60,
+  });
+}
+
 export function FittingRunnerView(container, { navigate, showToast }) {
 
   function render() {
     const state = getState();
     const ready = state.files?.length && state.columnMap && state.circuitConfig;
+    const cached = ready && state.fitResults?.length && state.fitCacheKey === configKey(state);
 
     container.innerHTML = `
       <div class="section-header">Fit</div>
@@ -21,10 +40,24 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         <div class="progress-bar-wrap"><div class="progress-bar-fill" id="progress-bar"></div></div>
       </div>
 
+      ${cached
+        ? `<div class="cache-banner" id="cache-banner">✓ Cached results — config unchanged. <a href="#" id="clear-cache-link">Re-run anyway</a></div>`
+        : (state.fitResults?.length && ready
+            ? `<div class="cache-banner stale" id="cache-banner">⚠ Config changed — results below are from a previous run.</div>`
+            : '')
+      }
+
       <div class="step-actions" style="margin-bottom:20px;">
         <button class="btn btn-secondary" id="back-btn">← Back</button>
         <div class="spacer"></div>
-        <button class="btn btn-primary" id="run-btn" ${!ready ? 'disabled' : ''}>▶ Run Fitting</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
+          Timeout
+          <input id="fit-timeout" type="number" min="5" max="600" step="5"
+                 value="${state.fitTimeout ?? 60}"
+                 style="width:64px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;text-align:right;">
+          s / fit
+        </label>
+        <button class="btn btn-primary" id="run-btn" ${!ready ? 'disabled' : ''}>${cached ? '↺ Re-run Fitting' : '▶ Run Fitting'}</button>
         <button class="btn btn-secondary" id="next-btn" ${!state.fitResults?.length ? 'disabled' : ''}>View Trends →</button>
       </div>
 
@@ -36,6 +69,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     container.querySelector('#back-btn').addEventListener('click', () => navigate(4));
     container.querySelector('#next-btn').addEventListener('click', () => navigate(6));
     container.querySelector('#run-btn').addEventListener('click', runFitting);
+    container.querySelector('#clear-cache-link')?.addEventListener('click', e => { e.preventDefault(); runFitting(); });
   }
 
   async function runFitting() {
@@ -54,12 +88,18 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     grid.innerHTML = '';
 
     const results = [];
+    // Invalidate cache immediately so a mid-run navigation shows partial results, not stale ones
+    setState({ fitCacheKey: null, fitResults: [] });
 
     try {
+      const timeout = parseFloat(container.querySelector('#fit-timeout').value) || 60;
+      setState({ fitTimeout: timeout });
+
       const request = {
         files:          state.files,
         column_map:     state.columnMap,
         circuit_config: state.circuitConfig,
+        fit_timeout:    timeout,
       };
 
       for await (const event of streamFitting(request)) {
@@ -72,6 +112,8 @@ export function FittingRunnerView(container, { navigate, showToast }) {
           results.push(result);
           grid.insertAdjacentHTML('beforeend', buildCard(result));
           plotNyquist(result);
+          // Write each result to state as it arrives so navigating away preserves progress
+          setState({ fitResults: [...results] });
         } else if (event.event === 'done') {
           progressBar.style.width = '100%';
           const ok = results.filter(r => r.success).length;
@@ -81,9 +123,15 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     } catch (err) {
       showToast(`Fitting error: ${err.message}`, 'error');
     } finally {
-      runBtn.disabled   = false;
-      nextBtn.disabled  = !results.length;
-      setState({ fitResults: results, maxStep: Math.max(state.maxStep, 6) });
+      runBtn.disabled  = false;
+      nextBtn.disabled = !results.length;
+      // Only stamp the cache key when the run fully completes (not on error/interrupt)
+      const completed = results.length === state.files.length;
+      setState({
+        fitResults:   results,
+        fitCacheKey:  completed ? configKey(getState()) : null,
+        maxStep:      Math.max(state.maxStep, 6),
+      });
     }
   }
 
@@ -98,7 +146,11 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       .join(' · ');
 
     const paramStr = Object.entries(result.parameters || {})
-      .map(([k, v]) => `<span>${k}</span>${typeof v === 'number' ? v.toExponential(3) : v}`)
+      .map(([k, v]) => {
+        const { scale, unit } = paramUnitInfo(k);
+        const disp = typeof v === 'number' ? (v * scale).toExponential(3) : v;
+        return `<span>${k}</span>${disp}${unit ? ' ' + unit : ''}`;
+      })
       .join(' &nbsp; ');
 
     const safeId = result.filename.replace(/[^a-zA-Z0-9]/g, '_');
@@ -160,7 +212,6 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     Plotly.newPlot(el, traces, layout, { displayModeBar: false, responsive: true });
   }
 
-  // Replot all existing results on enter (Plotly may not be ready on first load)
   function replotAll() {
     const state = getState();
     (state.fitResults || []).forEach(r => plotNyquist(r));
@@ -169,7 +220,9 @@ export function FittingRunnerView(container, { navigate, showToast }) {
   return {
     onEnter() {
       render();
-      setTimeout(replotAll, 100); // slight delay until Plotly CDN is ready
+      // Two rAF ticks: first lets the browser paint the container at full size,
+      // second lets Plotly measure correctly before drawing.
+      requestAnimationFrame(() => requestAnimationFrame(replotAll));
     }
   };
 }
