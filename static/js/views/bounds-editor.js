@@ -114,7 +114,7 @@ export function BoundsEditorView(container, { navigate, showToast }) {
       });
     });
 
-    container.querySelector('#back-btn').addEventListener('click', () => navigate(3));
+    container.querySelector('#back-btn').addEventListener('click', () => navigate(4));
     container.querySelector('#next-btn').addEventListener('click', () => {
       const initial_guess = [], lower_bounds = [], upper_bounds = [];
       let valid = true;
@@ -141,8 +141,8 @@ export function BoundsEditorView(container, { navigate, showToast }) {
         upper_bounds,
       };
 
-      setState({ circuitConfig, maxStep: Math.max(getState().maxStep, 5) });
-      navigate(5);
+      setState({ circuitConfig, maxStep: Math.max(getState().maxStep, 6) });
+      navigate(6);
     });
   }
 
