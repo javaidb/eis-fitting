@@ -3,9 +3,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.drt import drt_batch_stream
 from backend.file_handler import scan_folder
 from backend.fitting import fit_batch_stream, get_param_names
-from backend.models import FitRequest, ParseCircuitRequest, ScanFolderRequest
+from backend.models import DRTRequest, FitRequest, ParseCircuitRequest, ScanFolderRequest
 
 app = FastAPI(title="EIS Fitting")
 
@@ -101,6 +102,19 @@ async def api_parse_circuit(request: ParseCircuitRequest):
 async def api_fit(request: FitRequest):
     async def stream():
         async for chunk in fit_batch_stream(request):
+            yield chunk
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/drt")
+async def api_drt(request: DRTRequest):
+    async def stream():
+        async for chunk in drt_batch_stream(request):
             yield chunk
 
     return StreamingResponse(
