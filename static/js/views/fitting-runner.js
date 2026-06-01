@@ -1,23 +1,23 @@
 import { getState, setState } from '../state.js';
 import { streamFitting } from '../api.js';
 
-const GOOD_THRESHOLD = 0.05;  // residual < 5% → good fit badge
+const GOOD_THRESHOLD = 0.05;
 
 function paramUnitInfo(name) {
   if (/^R\d/.test(name))          return { scale: 1000, unit: 'mΩ' };
   if (/^C\d/.test(name))          return { scale: 1,    unit: 'F' };
   if (/^L\d/.test(name))          return { scale: 1,    unit: 'H' };
   if (/^CPE\d+_0/.test(name))     return { scale: 1,    unit: 'Ω⁻¹·sⁿ' };
-  if (/^CPE\d+_1/.test(name))     return { scale: 1,    unit: '-' };        // n: dimensionless
-  if (/^W\d+(_0)?$/.test(name))   return { scale: 1,    unit: 'Ω·s½' };    // Warburg σ
-  if (/^Wo\d+_0/.test(name))      return { scale: 1000, unit: 'mΩ' };      // Wo resistance
-  if (/^Wo\d+_1/.test(name))      return { scale: 1,    unit: 's' };        // Wo time constant
-  if (/^Wo\d+_2/.test(name))      return { scale: 1,    unit: '-' };        // Wo exponent
-  if (/^Ws\d+_0/.test(name))      return { scale: 1000, unit: 'mΩ' };      // Ws resistance
-  if (/^Ws\d+_1/.test(name))      return { scale: 1,    unit: 's' };        // Ws time constant
-  if (/^Ws\d+_2/.test(name))      return { scale: 1,    unit: '-' };        // Ws exponent
-  if (/^La\d+_0/.test(name))      return { scale: 1,    unit: 'H' };        // bounded inductance
-  if (/^La\d+_1/.test(name))      return { scale: 1000, unit: 'mΩ' };      // bounded inductance R
+  if (/^CPE\d+_1/.test(name))     return { scale: 1,    unit: '-' };
+  if (/^W\d+(_0)?$/.test(name))   return { scale: 1,    unit: 'Ω·s½' };
+  if (/^Wo\d+_0/.test(name))      return { scale: 1000, unit: 'mΩ' };
+  if (/^Wo\d+_1/.test(name))      return { scale: 1,    unit: 's' };
+  if (/^Wo\d+_2/.test(name))      return { scale: 1,    unit: '-' };
+  if (/^Ws\d+_0/.test(name))      return { scale: 1000, unit: 'mΩ' };
+  if (/^Ws\d+_1/.test(name))      return { scale: 1,    unit: 's' };
+  if (/^Ws\d+_2/.test(name))      return { scale: 1,    unit: '-' };
+  if (/^La\d+_0/.test(name))      return { scale: 1,    unit: 'H' };
+  if (/^La\d+_1/.test(name))      return { scale: 1000, unit: 'mΩ' };
   return                                  { scale: 1,    unit: '' };
 }
 
@@ -30,18 +30,55 @@ function configKey(state) {
   });
 }
 
+function batteryIdFromPath(path) {
+  const parts = (path || '').replace(/\\/g, '/').split('/');
+  const parent = parts.length >= 2 ? parts[parts.length - 2] : '';
+  const m = parent.match(/(\d+)$/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function groupFiles(files) {
+  const groups = new Map();
+  for (const f of files) {
+    const bid = batteryIdFromPath(f.path);
+    const parts = (f.path || '').replace(/\\/g, '/').split('/');
+    const parent = parts.length >= 2 ? parts[parts.length - 2] : 'Files';
+    const key = bid != null ? `battery_${bid}` : parent;
+    const label = bid != null ? `Battery ${bid}` : parent;
+    if (!groups.has(key)) groups.set(key, { label, files: [] });
+    groups.get(key).files.push(f);
+  }
+  return groups;
+}
+
+// Stable, unique DOM id derived from a file's path (unique across batteries even
+// when filenames repeat, e.g. battery_01/EIS.csv and battery_02/EIS.csv).
+function pathToSafeId(path) {
+  return (path || '').replace(/[^a-zA-Z0-9]/g, '_');
+}
+
 export function FittingRunnerView(container, { navigate, showToast }) {
+  // Keyed by file path (unique), not filename (which can repeat across batteries).
+  const resultMap = new Map();
 
   function render() {
     const state = getState();
     const ready = state.files?.length && state.columnMap && state.circuitConfig;
     const cached = ready && state.fitResults?.length && state.fitCacheKey === configKey(state);
 
+    // Correlate saved results to files by position — results are stored in the same
+    // order as state.files, so fitResults[i] belongs to files[i].
+    resultMap.clear();
+    const files = state.files || [];
+    (state.fitResults || []).forEach((r, i) => {
+      if (files[i]) resultMap.set(files[i].path, r);
+    });
+
     container.innerHTML = `
       <div class="section-header">Fit</div>
       <div class="section-sub">
         Circuit: <code style="color:var(--accent)">${state.circuitString || '—'}</code>
-        &nbsp;·&nbsp; ${state.files?.length ?? 0} file(s)
+        &nbsp;·&nbsp; ${files.length} file(s)
       </div>
 
       <div class="fitting-status" id="fit-status" style="display:none;">
@@ -66,39 +103,171 @@ export function FittingRunnerView(container, { navigate, showToast }) {
                  style="width:64px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;text-align:right;">
           s / fit
         </label>
+        <button class="btn btn-danger" id="stop-btn" style="display:none;">■ Stop</button>
         <button class="btn btn-primary" id="run-btn" ${!ready ? 'disabled' : ''}>${cached ? '↺ Re-run Fitting' : '▶ Run Fitting'}</button>
         <button class="btn btn-secondary" id="next-btn" ${!state.fitResults?.length ? 'disabled' : ''}>View Trends →</button>
       </div>
 
-      <div class="nyquist-grid" id="nyquist-grid">
-        ${(state.fitResults || []).map(r => buildCard(r)).join('')}
+      <div class="fit-tile-root" id="fit-tile-root">
+        ${buildTileGrid(files, resultMap)}
+      </div>
+
+      <div class="fit-modal-overlay" id="fit-modal" style="display:none;" role="dialog" aria-modal="true">
+        <div class="fit-modal-box">
+          <div class="fit-modal-header">
+            <span class="fit-modal-title" id="fit-modal-title"></span>
+            <span class="residual-badge" id="fit-modal-badge"></span>
+            <button class="fit-modal-close" id="fit-modal-close" aria-label="Close">✕</button>
+          </div>
+          <div class="fit-modal-meta" id="fit-modal-meta"></div>
+          <div class="fit-modal-plot" id="fit-modal-plot"></div>
+          <div class="params-summary fit-modal-params" id="fit-modal-params"></div>
+        </div>
       </div>
     `;
 
     container.querySelector('#back-btn').addEventListener('click', () => navigate(5));
     container.querySelector('#next-btn').addEventListener('click', () => navigate(7));
     container.querySelector('#run-btn').addEventListener('click', runFitting);
+    container.querySelector('#stop-btn').addEventListener('click', stopFitting);
     container.querySelector('#clear-cache-link')?.addEventListener('click', e => { e.preventDefault(); runFitting(); });
+    container.querySelector('#fit-modal-close').addEventListener('click', closeModal);
+    container.querySelector('#fit-modal').addEventListener('click', e => {
+      if (e.target === e.currentTarget) closeModal();
+    });
+
+    wireTileClicks();
+  }
+
+  function buildTileGrid(files, rMap) {
+    if (!files.length) return '';
+    const groups = groupFiles(files);
+    return [...groups.entries()].map(([, { label, files: gFiles }]) => `
+      <div class="fit-group">
+        <div class="fit-group-header">${label}</div>
+        <div class="fit-tile-row">
+          ${gFiles.map(f => buildTile(f.filename, f.path, rMap.get(f.path))).join('')}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // path is used as the unique tile key (filename repeats across batteries, path never does).
+  function buildTile(filename, path, result) {
+    const safeId = pathToSafeId(path);
+    if (!result) {
+      return `<div class="fit-tile pending" data-path="${path}" id="tile-${safeId}">
+        <div class="fit-tile-name">${filename}</div>
+        <div class="fit-tile-pct">—</div>
+      </div>`;
+    }
+    const good = result.success && result.residual != null && result.residual < GOOD_THRESHOLD;
+    const cls = result.success ? (good ? 'good' : 'poor') : 'failed';
+    const pct = result.residual != null ? `${(result.residual * 100).toFixed(1)}%` : '—';
+    return `<div class="fit-tile ${cls}" data-path="${path}" id="tile-${safeId}">
+      <div class="fit-tile-name">${filename}</div>
+      <div class="fit-tile-pct">${result.success ? pct : 'FAILED'}</div>
+    </div>`;
+  }
+
+  function wireTileClicks() {
+    container.querySelectorAll('.fit-tile:not(.pending)').forEach(el => {
+      el.addEventListener('click', () => {
+        const result = resultMap.get(el.dataset.path);
+        if (result) openModal(result);
+      });
+    });
+  }
+
+  function updateTile(result, path) {
+    const el = container.querySelector(`#tile-${pathToSafeId(path)}`);
+    if (!el) return;
+
+    const good = result.success && result.residual != null && result.residual < GOOD_THRESHOLD;
+    const cls = result.success ? (good ? 'good' : 'poor') : 'failed';
+    const pct = result.residual != null ? `${(result.residual * 100).toFixed(1)}%` : '—';
+
+    el.className = `fit-tile ${cls}`;
+    el.querySelector('.fit-tile-pct').textContent = result.success ? pct : 'FAILED';
+    el.addEventListener('click', () => openModal(result));
+  }
+
+  function openModal(result) {
+    const modal    = container.querySelector('#fit-modal');
+    const titleEl  = container.querySelector('#fit-modal-title');
+    const badgeEl  = container.querySelector('#fit-modal-badge');
+    const metaEl   = container.querySelector('#fit-modal-meta');
+    const plotEl   = container.querySelector('#fit-modal-plot');
+    const paramsEl = container.querySelector('#fit-modal-params');
+
+    titleEl.textContent = result.filename;
+
+    const good = result.success && result.residual != null && result.residual < GOOD_THRESHOLD;
+    const qualClass = result.success ? (good ? 'good' : 'poor') : 'poor';
+    const residualPct = result.residual != null ? (result.residual * 100).toFixed(2) : '—';
+    badgeEl.className = `residual-badge ${qualClass}`;
+    badgeEl.textContent = result.success ? `${residualPct}%` : 'FAILED';
+
+    const charStr = Object.entries(result.characterization || {})
+      .map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toPrecision(4) : v}`)
+      .join(' · ');
+    metaEl.textContent = charStr;
+    if (result.error) metaEl.textContent += (charStr ? ' · ' : '') + result.error;
+
+    paramsEl.innerHTML = Object.entries(result.parameters || {})
+      .map(([k, v]) => {
+        const { scale, unit } = paramUnitInfo(k);
+        const disp = typeof v === 'number' ? (v * scale).toExponential(3) : v;
+        return `<span>${k}</span>${disp}${unit ? ' ' + unit : ''}`;
+      })
+      .join(' &nbsp; ');
+
+    plotEl.innerHTML = '';
+    modal.style.display = 'flex';
+    requestAnimationFrame(() => plotNyquist(result, plotEl));
+  }
+
+  function closeModal() {
+    container.querySelector('#fit-modal').style.display = 'none';
+    container.querySelector('#fit-modal-plot').innerHTML = '';
+  }
+
+  let _abortCtrl = null;
+
+  function stopFitting() {
+    _abortCtrl?.abort();
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'Escape') closeModal();
   }
 
   async function runFitting() {
     const state = getState();
     if (!state.files?.length || !state.columnMap || !state.circuitConfig) return;
 
-    const runBtn  = container.querySelector('#run-btn');
-    const nextBtn = container.querySelector('#next-btn');
-    const fitStatus = container.querySelector('#fit-status');
-    const progressBar = container.querySelector('#progress-bar');
+    const runBtn        = container.querySelector('#run-btn');
+    const stopBtn       = container.querySelector('#stop-btn');
+    const nextBtn       = container.querySelector('#next-btn');
+    const fitStatus     = container.querySelector('#fit-status');
+    const progressBar   = container.querySelector('#progress-bar');
     const progressLabel = container.querySelector('#progress-label');
-    const grid = container.querySelector('#nyquist-grid');
+    const tileRoot      = container.querySelector('#fit-tile-root');
 
+    // Ordered list of file paths matching the order the server will return results.
+    const filePaths = state.files.map(f => f.path);
+
+    _abortCtrl = new AbortController();
     runBtn.disabled = true;
+    stopBtn.style.display = '';
     fitStatus.style.display = '';
-    grid.innerHTML = '';
+
+    resultMap.clear();
+    setState({ fitCacheKey: null, fitResults: [] });
+    tileRoot.innerHTML = buildTileGrid(state.files, resultMap);
 
     const results = [];
-    // Invalidate cache immediately so a mid-run navigation shows partial results, not stale ones
-    setState({ fitCacheKey: null, fitResults: [] });
+    let stopped = false;
 
     try {
       const timeout = parseFloat(container.querySelector('#fit-timeout').value) || 60;
@@ -111,18 +280,22 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         fit_timeout:    timeout,
       };
 
-      for await (const event of streamFitting(request)) {
+      for await (const event of streamFitting(request, _abortCtrl.signal)) {
         if (event.event === 'progress') {
           const pct = Math.round((event.index / event.total) * 100);
           progressBar.style.width = `${pct}%`;
           progressLabel.textContent = `Fitting ${event.file} (${event.index + 1} / ${event.total})`;
         } else if (event.event === 'result') {
           const result = event.data;
+          // results arrive in the same order as filePaths, so index = current length before push
+          const path = filePaths[results.length];
           results.push(result);
-          grid.insertAdjacentHTML('beforeend', buildCard(result));
-          plotNyquist(result);
-          // Write each result to state as it arrives so navigating away preserves progress
-          setState({ fitResults: [...results] });
+          resultMap.set(path, result);
+          updateTile(result, path);
+          // Yield a paint frame so each tile visually updates before the next result
+          // is processed — without this, a burst of SSE events in one TCP chunk would
+          // be handled entirely in microtasks with no repaint opportunity between them.
+          await new Promise(r => requestAnimationFrame(r));
         } else if (event.event === 'done') {
           progressBar.style.width = '100%';
           const ok = results.filter(r => r.success).length;
@@ -130,108 +303,66 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         }
       }
     } catch (err) {
-      showToast(`Fitting error: ${err.message}`, 'error');
+      if (err.name === 'AbortError') {
+        stopped = true;
+        const ok = results.filter(r => r.success).length;
+        progressLabel.textContent = `Stopped — ${ok}/${results.length} completed`;
+      } else {
+        showToast(`Fitting error: ${err.message}`, 'error');
+      }
     } finally {
       runBtn.disabled  = false;
+      stopBtn.style.display = 'none';
       nextBtn.disabled = !results.length;
-      // Only stamp the cache key when the run fully completes (not on error/interrupt)
-      const completed = results.length === state.files.length;
+      const completed = !stopped && results.length === state.files.length;
       setState({
-        fitResults:   results,
-        fitCacheKey:  completed ? configKey(getState()) : null,
-        maxStep:      Math.max(state.maxStep, 7),
+        fitResults:  results,
+        fitCacheKey: completed ? configKey(getState()) : null,
+        maxStep:     Math.max(state.maxStep, 7),
       });
     }
   }
 
-  function buildCard(result) {
-    const good = result.success && result.residual != null && result.residual < GOOD_THRESHOLD;
-    const poor = !result.success || (result.residual != null && result.residual >= GOOD_THRESHOLD);
-    const qualClass = result.success ? (good ? 'good' : 'poor') : 'poor';
-    const residualPct = result.residual != null ? (result.residual * 100).toFixed(2) : '—';
-
-    const charStr = Object.entries(result.characterization || {})
-      .map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toPrecision(4) : v}`)
-      .join(' · ');
-
-    const paramStr = Object.entries(result.parameters || {})
-      .map(([k, v]) => {
-        const { scale, unit } = paramUnitInfo(k);
-        const disp = typeof v === 'number' ? (v * scale).toExponential(3) : v;
-        return `<span>${k}</span>${disp}${unit ? ' ' + unit : ''}`;
-      })
-      .join(' &nbsp; ');
-
-    const safeId = result.filename.replace(/[^a-zA-Z0-9]/g, '_');
-
-    return `
-      <div class="nyquist-card ${qualClass}" data-filename="${result.filename}">
-        <div class="nyquist-card-title">
-          <span title="${result.filename}">${result.filename}</span>
-          <span class="residual-badge ${qualClass}">${result.success ? `${residualPct}%` : 'FAILED'}</span>
-        </div>
-        ${charStr ? `<div style="padding:4px 12px; font-size:11px; color:var(--text-muted);">${charStr}</div>` : ''}
-        ${result.error ? `<div style="padding:8px 12px; font-size:12px; color:var(--danger);">${result.error}</div>` : ''}
-        <div class="nyquist-plot" id="nyq-${safeId}"></div>
-        ${paramStr ? `<div class="params-summary">${paramStr}</div>` : ''}
-      </div>
-    `;
-  }
-
-  function plotNyquist(result) {
-    const safeId = result.filename.replace(/[^a-zA-Z0-9]/g, '_');
-    const el = container.querySelector(`#nyq-${safeId}`);
+  function plotNyquist(result, el) {
     if (!el || typeof Plotly === 'undefined') return;
 
     const traces = [];
-
     if (result.z_real_data?.length) {
       traces.push({
         x: result.z_real_data,
         y: result.z_imag_data.map(v => -v),
-        mode: 'markers',
-        type: 'scatter',
-        name: 'Data',
+        mode: 'markers', type: 'scatter', name: 'Data',
         marker: { color: '#8892b0', size: 5 },
       });
     }
-
     if (result.success && result.z_real_fit?.length) {
       traces.push({
         x: result.z_real_fit,
         y: result.z_imag_fit.map(v => -v),
-        mode: 'lines',
-        type: 'scatter',
-        name: 'Fit',
+        mode: 'lines', type: 'scatter', name: 'Fit',
         line: { color: 'var(--accent)', width: 2 },
       });
     }
 
-    const layout = {
+    Plotly.newPlot(el, traces, {
       paper_bgcolor: 'transparent',
       plot_bgcolor:  'transparent',
-      margin: { t: 4, r: 8, b: 36, l: 48 },
-      font:   { color: '#8892b0', size: 10 },
+      margin: { t: 8, r: 16, b: 48, l: 64 },
+      font:   { color: '#8892b0', size: 11 },
       xaxis:  { title: "Z' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: false },
       yaxis:  { title: "-Z'' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: false, scaleanchor: 'x', scaleratio: 1 },
       legend: { x: 0.7, y: 0.95, font: { size: 10 } },
       showlegend: true,
-    };
-
-    Plotly.newPlot(el, traces, layout, { displayModeBar: false, responsive: true });
-  }
-
-  function replotAll() {
-    const state = getState();
-    (state.fitResults || []).forEach(r => plotNyquist(r));
+    }, { displayModeBar: false, responsive: true });
   }
 
   return {
     onEnter() {
       render();
-      // Two rAF ticks: first lets the browser paint the container at full size,
-      // second lets Plotly measure correctly before drawing.
-      requestAnimationFrame(() => requestAnimationFrame(replotAll));
-    }
+      document.addEventListener('keydown', onKeyDown);
+    },
+    onLeave() {
+      document.removeEventListener('keydown', onKeyDown);
+    },
   };
 }
