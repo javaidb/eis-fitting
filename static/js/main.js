@@ -35,9 +35,10 @@ VIEWS.forEach(({ step, el, factory }) => {
 
 // ── Navigation ───────────────────────────────────────────────────
 export function navigate(step) {
-  const { maxStep } = getState();
-  if (step > maxStep) return;
+  const state = getState();
+  if (step > state.maxStep) return;
 
+  const prev = state.step;
   setState({ step });
 
   VIEWS.forEach(({ step: s, el }) => {
@@ -48,10 +49,11 @@ export function navigate(step) {
   nav.querySelectorAll('.step-btn').forEach(btn => {
     const n = parseInt(btn.dataset.step, 10);
     btn.classList.toggle('active', n === step);
-    btn.classList.toggle('done', n < step && n <= maxStep);
-    btn.disabled = n > maxStep;
+    btn.classList.toggle('done', n < step && n <= state.maxStep);
+    btn.disabled = n > state.maxStep;
   });
 
+  if (prev !== step) instances[prev]?.onLeave?.();
   instances[step]?.onEnter?.();
 }
 
