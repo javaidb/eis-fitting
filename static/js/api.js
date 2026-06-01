@@ -70,11 +70,12 @@ export async function* streamDRT(request) {
 }
 
 // Returns an async generator yielding parsed SSE event objects.
-export async function* streamFitting(request) {
+export async function* streamFitting(request, signal) {
   const res = await fetch('/api/fit', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
