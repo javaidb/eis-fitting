@@ -538,6 +538,142 @@ select option { background: var(--surface2); }
 .params-summary span { color: var(--text); font-weight: 600; margin-right: 8px; }
 
 /* ───────────────────────────────────────────
+   Fit tile grid
+─────────────────────────────────────────── */
+.fit-group { margin-bottom: 16px; }
+.fit-group-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.fit-tile-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.fit-tile {
+  width: 100px;
+  padding: 5px 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: default;
+  user-select: none;
+  transition: border-color var(--transition), background var(--transition), transform var(--transition);
+}
+.fit-tile.pending {
+  opacity: 0.45;
+}
+.fit-tile.good {
+  border-color: var(--success);
+  cursor: pointer;
+}
+.fit-tile.poor {
+  border-color: var(--danger);
+  cursor: pointer;
+}
+.fit-tile.failed {
+  border-color: var(--danger);
+  opacity: 0.65;
+  cursor: pointer;
+}
+.fit-tile.good:hover  { background: rgba(76,175,125,0.08); transform: translateY(-1px); }
+.fit-tile.poor:hover  { background: rgba(224,92,92,0.08);  transform: translateY(-1px); }
+.fit-tile.failed:hover { background: rgba(224,92,92,0.05); transform: translateY(-1px); }
+.fit-tile-name {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+.fit-tile-pct {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+.fit-tile.good  .fit-tile-pct { color: var(--success); }
+.fit-tile.poor  .fit-tile-pct { color: var(--danger); }
+.fit-tile.failed .fit-tile-pct { color: var(--danger); }
+
+/* ───────────────────────────────────────────
+   Fit result modal
+─────────────────────────────────────────── */
+.fit-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+.fit-modal-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  width: min(680px, 94vw);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.fit-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.fit-modal-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fit-modal-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+  transition: color var(--transition), background var(--transition);
+}
+.fit-modal-close:hover { color: var(--text); background: var(--surface2); }
+.fit-modal-meta {
+  padding: 6px 16px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  min-height: 28px;
+}
+.fit-modal-plot {
+  flex: 1;
+  min-height: 320px;
+  max-height: 420px;
+}
+.fit-modal-params {
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* ───────────────────────────────────────────
    DRT table
 ─────────────────────────────────────────── */
 .drt-table {
