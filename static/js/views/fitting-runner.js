@@ -3,6 +3,16 @@ import { streamFitting } from '../api.js';
 
 const GOOD_THRESHOLD = 0.05;
 
+function checkPhysical(name, value) {
+  if (/^R\d/.test(name)  && value < 0)          return 'negative resistance';
+  if (/^C\d/.test(name)  && value <= 0)          return 'non-positive capacitance';
+  if (/^C\d/.test(name)  && value > 1)           return 'C > 1 F (check units)';
+  if (/^L\d/.test(name)  && value < 0)           return 'negative inductance';
+  if (/^CPE\d+_1/.test(name) && (value < 0 || value > 1)) return 'α outside 0–1';
+  if (/^(Wo|Ws|W)\d/.test(name) && value < 0)   return 'negative Warburg';
+  return null;
+}
+
 function paramUnitInfo(name) {
   if (/^R\d/.test(name))          return { scale: 1000, unit: 'mΩ' };
   if (/^C\d/.test(name))          return { scale: 1,    unit: 'F' };
@@ -120,6 +130,11 @@ export function FittingRunnerView(container, { navigate, showToast }) {
             <button class="fit-modal-close" id="fit-modal-close" aria-label="Close">✕</button>
           </div>
           <div class="fit-modal-meta" id="fit-modal-meta"></div>
+          <div class="fit-modal-tabs" id="fit-modal-tabs">
+            <button class="tab-btn active" data-tab="nyquist">Nyquist</button>
+            <button class="tab-btn" data-tab="bode">Bode</button>
+            <button class="tab-btn" data-tab="residuals">Residuals</button>
+          </div>
           <div class="fit-modal-plot" id="fit-modal-plot"></div>
           <div class="params-summary fit-modal-params" id="fit-modal-params"></div>
         </div>
@@ -189,7 +204,10 @@ export function FittingRunnerView(container, { navigate, showToast }) {
 
     el.className = `fit-tile ${cls}`;
     el.querySelector('.fit-tile-pct').textContent = result.success ? pct : 'FAILED';
-    el.addEventListener('click', () => openModal(result));
+    // Clone to drop accumulated listeners from any previous run before adding the new one.
+    const fresh = el.cloneNode(true);
+    fresh.addEventListener('click', () => openModal(result));
+    el.replaceWith(fresh);
   }
 
   function openModal(result) {
@@ -203,7 +221,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     titleEl.textContent = result.filename;
 
     const good = result.success && result.residual != null && result.residual < GOOD_THRESHOLD;
-    const qualClass = result.success ? (good ? 'good' : 'poor') : 'poor';
+    const qualClass = result.success ? (good ? 'good' : 'poor') : 'failed';
     const residualPct = result.residual != null ? (result.residual * 100).toFixed(2) : '—';
     badgeEl.className = `residual-badge ${qualClass}`;
     badgeEl.textContent = result.success ? `${residualPct}%` : 'FAILED';
@@ -218,9 +236,29 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       .map(([k, v]) => {
         const { scale, unit } = paramUnitInfo(k);
         const disp = typeof v === 'number' ? (v * scale).toExponential(3) : v;
-        return `<span>${k}</span>${disp}${unit ? ' ' + unit : ''}`;
+        const warn = typeof v === 'number' ? checkPhysical(k, v) : null;
+        const warnHtml = warn ? ` <span class="param-warn" title="${warn}">⚠</span>` : '';
+        return `<span>${k}${warnHtml}</span>${disp}${unit ? ' ' + unit : ''}`;
       })
       .join(' &nbsp; ');
+
+    // Reset tabs to Nyquist and wire switching. Clone to clear previous result's listeners.
+    const tabsEl = container.querySelector('#fit-modal-tabs');
+    const freshTabs = tabsEl.cloneNode(true);
+    tabsEl.replaceWith(freshTabs);
+    freshTabs.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.tab === 'nyquist');
+      btn.addEventListener('click', () => {
+        freshTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        plotEl.innerHTML = '';
+        requestAnimationFrame(() => {
+          if (btn.dataset.tab === 'nyquist')   plotNyquist(result, plotEl);
+          else if (btn.dataset.tab === 'bode') plotBode(result, plotEl);
+          else                                 plotResiduals(result, plotEl);
+        });
+      });
+    });
 
     plotEl.innerHTML = '';
     modal.style.display = 'flex';
@@ -321,6 +359,67 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         maxStep:     Math.max(state.maxStep, 7),
       });
     }
+  }
+
+  function plotBode(result, el) {
+    if (!el || typeof Plotly === 'undefined') return;
+    const freqs = result.frequencies;
+    if (!freqs?.length) { el.textContent = 'No frequency data'; return; }
+
+    const dataMag   = result.z_real_data.map((r, i) => Math.sqrt(r ** 2 + result.z_imag_data[i] ** 2));
+    const dataPhase = result.z_real_data.map((r, i) => Math.atan2(result.z_imag_data[i], r) * 180 / Math.PI);
+
+    const traces = [
+      { x: freqs, y: dataMag,   mode: 'markers', name: '|Z| data',   marker: { color: '#8892b0', size: 5 }, xaxis: 'x',  yaxis: 'y'  },
+      { x: freqs, y: dataPhase, mode: 'markers', name: 'Phase data', marker: { color: '#8892b0', size: 5 }, xaxis: 'x2', yaxis: 'y2' },
+    ];
+
+    if (result.success && result.z_real_fit?.length) {
+      const fitMag   = result.z_real_fit.map((r, i) => Math.sqrt(r ** 2 + result.z_imag_fit[i] ** 2));
+      const fitPhase = result.z_real_fit.map((r, i) => Math.atan2(result.z_imag_fit[i], r) * 180 / Math.PI);
+      traces.push({ x: freqs, y: fitMag,   mode: 'lines', name: '|Z| fit',   line: { color: 'var(--accent)', width: 2 },              xaxis: 'x',  yaxis: 'y'  });
+      traces.push({ x: freqs, y: fitPhase, mode: 'lines', name: 'Phase fit', line: { color: 'var(--accent)', width: 2, dash: 'dash' }, xaxis: 'x2', yaxis: 'y2' });
+    }
+
+    const axisStyle = { type: 'log', color: '#8892b0', gridcolor: '#2d3147', zeroline: false };
+    Plotly.newPlot(el, traces, {
+      grid: { rows: 2, columns: 1, pattern: 'independent' },
+      paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+      margin: { t: 8, r: 16, b: 48, l: 64 },
+      font:   { color: '#8892b0', size: 11 },
+      xaxis:  { ...axisStyle, title: 'Frequency (Hz)' },
+      yaxis:  { ...axisStyle, title: '|Z| (Ω)' },
+      xaxis2: { ...axisStyle, title: 'Frequency (Hz)' },
+      yaxis2: { type: 'linear', color: '#8892b0', gridcolor: '#2d3147', title: 'Phase (°)' },
+      showlegend: false,
+    }, { displayModeBar: false, responsive: true });
+  }
+
+  function plotResiduals(result, el) {
+    if (!el || typeof Plotly === 'undefined') return;
+    const freqs = result.frequencies;
+    if (!freqs?.length || !result.success || !result.z_real_fit?.length) {
+      el.textContent = 'No residuals available';
+      return;
+    }
+
+    const realRes = result.z_real_data.map((r, i) =>
+      (r - result.z_real_fit[i]) / (Math.abs(r) + 1e-12) * 100);
+    const imagRes = result.z_imag_data.map((v, i) =>
+      (v - result.z_imag_fit[i]) / (Math.abs(v) + 1e-12) * 100);
+
+    Plotly.newPlot(el, [
+      { x: freqs, y: realRes, mode: 'markers+lines', name: "Z' residual",  marker: { color: '#e05c5c', size: 4 }, line: { color: '#e05c5c', width: 1 } },
+      { x: freqs, y: imagRes, mode: 'markers+lines', name: "Z'' residual", marker: { color: '#4a9ade', size: 4 }, line: { color: '#4a9ade', width: 1 } },
+    ], {
+      paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+      margin: { t: 8, r: 16, b: 48, l: 64 },
+      font:   { color: '#8892b0', size: 11 },
+      xaxis:  { title: 'Frequency (Hz)', type: 'log', color: '#8892b0', gridcolor: '#2d3147', zeroline: false },
+      yaxis:  { title: 'Residual (%)', color: '#8892b0', gridcolor: '#2d3147', zeroline: true, zerolinecolor: '#4a5080' },
+      legend: { x: 0.6, y: 0.95, font: { size: 10 } },
+      showlegend: true,
+    }, { displayModeBar: false, responsive: true });
   }
 
   function plotNyquist(result, el) {
