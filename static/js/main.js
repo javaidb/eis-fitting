@@ -64,6 +64,67 @@ document.getElementById('step-nav').addEventListener('click', e => {
   navigate(parseInt(btn.dataset.step, 10));
 });
 
+// ── Project save / load ─────────────────────────────────────────
+function saveProject() {
+  const s = getState();
+  const project = {
+    version:       1,
+    files:         s.files,
+    columnMap:     s.columnMap,
+    charUnits:     s.charUnits,
+    circuitString: s.circuitString,
+    circuitTree:   s.circuitTree,
+    circuitConfig: s.circuitConfig,
+    fitResults:    s.fitResults,
+    fitCacheKey:   s.fitCacheKey,
+    fitTimeout:    s.fitTimeout,
+    drtLambda:     s.drtLambda,
+    maxStep:       s.maxStep,
+  };
+  const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'eis-project.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function loadProject(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const proj = JSON.parse(e.target.result);
+      if (!proj.version) throw new Error('Not a valid EIS project file');
+      setState({
+        files:         proj.files         ?? [],
+        columnMap:     proj.columnMap     ?? null,
+        charUnits:     proj.charUnits     ?? {},
+        circuitString: proj.circuitString ?? '',
+        circuitTree:   proj.circuitTree   ?? { nodes: [] },
+        circuitConfig: proj.circuitConfig ?? null,
+        fitResults:    proj.fitResults    ?? [],
+        fitCacheKey:   proj.fitCacheKey   ?? null,
+        fitTimeout:    proj.fitTimeout    ?? 60,
+        drtLambda:     proj.drtLambda     ?? 1e-3,
+        maxStep:       proj.maxStep       ?? 1,
+        step:          1,
+      });
+      navigate(1);
+      showToast('Project loaded.', 'success');
+    } catch (err) {
+      showToast(`Failed to load project: ${err.message}`, 'error');
+    }
+  };
+  reader.readAsText(file);
+}
+
+document.getElementById('save-project-btn').addEventListener('click', saveProject);
+document.getElementById('load-project-input').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (file) { loadProject(file); e.target.value = ''; }
+});
+
 // ── Initial render ───────────────────────────────────────────────
 const { step, maxStep } = getState();
 
