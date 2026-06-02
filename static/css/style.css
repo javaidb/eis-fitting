@@ -81,6 +81,15 @@ body {
   opacity: 1;
   white-space: nowrap;
 }
+.project-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+}
+.project-load-label {
+  cursor: pointer;
+}
 
 /* Step nav */
 .step-nav {
@@ -531,8 +540,9 @@ select option { background: var(--surface2); }
   border-radius: 99px;
   font-weight: 600;
 }
-.residual-badge.good  { background: rgba(76,175,125,0.2); color: var(--success); }
-.residual-badge.poor  { background: rgba(224,92,92,0.2);  color: var(--danger); }
+.residual-badge.good   { background: rgba(76,175,125,0.2);  color: var(--success); }
+.residual-badge.poor   { background: rgba(224,92,92,0.2);   color: var(--danger); }
+.residual-badge.failed { background: rgba(224,92,92,0.12);  color: var(--danger); letter-spacing: 0.03em; }
 .nyquist-plot { height: 200px; }
 .params-summary { padding: 8px 12px; font-size: 11px; color: var(--text-muted); }
 .params-summary span { color: var(--text); font-weight: 600; margin-right: 8px; }
@@ -668,6 +678,32 @@ select option { background: var(--surface2); }
   min-height: 320px;
   max-height: 420px;
 }
+.fit-modal-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 4px 16px 0;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+  margin-bottom: -1px;
+}
+.tab-btn:hover  { color: var(--text); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.param-warn {
+  color: var(--warning);
+  font-size: 10px;
+  cursor: help;
+  margin-left: 2px;
+}
 .fit-modal-params {
   border-top: 1px solid var(--border);
   flex-shrink: 0;
@@ -722,6 +758,18 @@ select option { background: var(--surface2); }
   grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
   gap: 20px;
 }
+.trend-section {
+  margin-bottom: 28px;
+}
+.trend-section-header {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 6px 0 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+  text-transform: capitalize;
+}
 .trend-plot-card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -760,8 +808,9 @@ select option { background: var(--surface2); }
   max-width: 320px;
   animation: slide-in 0.2s ease;
 }
-.toast.error  { border-left-color: var(--danger); }
+.toast.error   { border-left-color: var(--danger); }
 .toast.success { border-left-color: var(--success); }
+.toast.warning { border-left-color: var(--warning); }
 @keyframes slide-in {
   from { transform: translateX(40px); opacity: 0; }
   to   { transform: translateX(0);    opacity: 1; }
