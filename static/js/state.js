@@ -45,6 +45,14 @@ function _load() {
         parsed._sv = 2;
       }
       _state = { ..._defaults, ...parsed, fitting: false };
+
+      // Defensive: ensure maxStep is never lower than what saved data implies.
+      // Guards against half-migrated states or in-dev schema bumps.
+      if (_state.fitResults?.length)  _state.maxStep = Math.max(_state.maxStep, 7);
+      if (_state.circuitConfig)        _state.maxStep = Math.max(_state.maxStep, 6);
+      if (_state.circuitString)        _state.maxStep = Math.max(_state.maxStep, 5);
+      if (_state.columnMap)            _state.maxStep = Math.max(_state.maxStep, 3);
+      if (_state.files?.length)        _state.maxStep = Math.max(_state.maxStep, 2);
     }
   } catch (_) { /* ignore */ }
 }
