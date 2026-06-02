@@ -21,16 +21,27 @@ export function TrendsView(container, { navigate, showToast }) {
     const paramNames = Object.keys(results[0].parameters);
     const charLabels = Object.keys(results[0].characterization || {});
 
-    // battery_id is always the color grouping — never an x-axis option
-    const xOptions = charLabels.filter(l => l !== 'battery_id').length
-      ? charLabels.filter(l => l !== 'battery_id')
-      : ['File index'];
+    const xOptions = charLabels.length ? charLabels : ['File index'];
 
     const state2 = getState();
-    const savedX       = state2._trendsX || xOptions[0];
-    const savedY       = state2._trendsY || paramNames.slice(0, Math.min(paramNames.length, 4));
-    const charUnits    = state2.charUnits || {};
-    const savedBoxMode = state2._trendsBoxMode !== false; // default true
+    const savedX        = state2._trendsX || xOptions[0];
+    const savedY        = state2._trendsY || paramNames.slice(0, Math.min(paramNames.length, 4));
+    const charUnits     = state2.charUnits || {};
+
+    // Map battery_id value → raw subfolder name for legend labels
+    const batteryLabels = {};
+    (state2.fitResults || []).forEach((r, i) => {
+      const bid = r.characterization?.battery_id;
+      if (bid != null && (state2.files || [])[i]) {
+        const parts = (state2.files[i].path || '').replace(/\\/g, '/').split('/');
+        const sub = parts.length >= 2 ? parts[parts.length - 2] : '';
+        if (sub) batteryLabels[String(bid)] = sub;
+      }
+    });
+    const savedBoxMode  = state2._trendsBoxMode !== false; // default true
+    const savedConf     = state2._trendsConf    === true;  // default false
+    const savedGroupBy  = state2._trendsGroupBy ?? (charLabels.includes('battery_id') ? 'battery_id' : charLabels[0]);
+    const savedSection  = state2._trendsSection  ?? 'none';
 
     container.innerHTML = `
       <div class="section-header">Trends</div>
@@ -43,17 +54,35 @@ export function TrendsView(container, { navigate, showToast }) {
             ${xOptions.map(o => `<option value="${o}" ${o === savedX ? 'selected' : ''}>${o}</option>`).join('')}
           </select>
         </div>
+        <div class="col" style="flex:0 0 160px;">
+          <label>Group by (line color)</label>
+          <select id="group-by">
+            ${charLabels.map(o => `<option value="${o}" ${o === savedGroupBy ? 'selected' : ''}>${o}</option>`).join('')}
+          </select>
+        </div>
+        <div class="col" style="flex:0 0 160px;">
+          <label>Section by</label>
+          <select id="section-by">
+            <option value="none" ${savedSection === 'none' ? 'selected' : ''}>None</option>
+            ${charLabels.map(o => `<option value="${o}" ${o === savedSection ? 'selected' : ''}>${o}</option>`).join('')}
+          </select>
+        </div>
         <div class="col">
           <label>Parameters to plot (hold Ctrl to multi-select)</label>
           <select id="y-params" multiple size="${Math.min(paramNames.length, 5)}" style="min-width:200px;">
             ${paramNames.map(p => `<option value="${p}" ${savedY.includes(p) ? 'selected' : ''}>${p}</option>`).join('')}
           </select>
         </div>
-        <div class="col" style="flex:0 0 auto;align-self:flex-end;">
+        <div class="col" style="flex:0 0 auto;align-self:flex-end;display:flex;flex-direction:column;gap:8px;">
           <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-muted);cursor:pointer;">
             <input type="checkbox" id="box-mode-toggle" ${savedBoxMode ? 'checked' : ''}
                    style="width:15px;height:15px;cursor:pointer;accent-color:var(--accent);">
             Box &amp; whisker
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-muted);cursor:pointer;">
+            <input type="checkbox" id="conf-toggle" ${savedConf ? 'checked' : ''}
+                   style="width:15px;height:15px;cursor:pointer;accent-color:var(--accent);">
+            ± confidence
           </label>
         </div>
         <button class="btn btn-primary" id="update-btn" style="align-self:flex-end;">Update Plots</button>
@@ -81,34 +110,74 @@ export function TrendsView(container, { navigate, showToast }) {
     updatePlots();
 
     function getSelections() {
-      const xAxis   = container.querySelector('#x-axis').value;
-      const groupBy = 'battery_id';
-      const yParams = [...container.querySelector('#y-params').selectedOptions].map(o => o.value);
-      const boxMode = container.querySelector('#box-mode-toggle').checked;
-      return { xAxis, groupBy, yParams, boxMode };
+      const xAxis     = container.querySelector('#x-axis').value;
+      const groupBy   = container.querySelector('#group-by').value;
+      const sectionBy = container.querySelector('#section-by').value;
+      const yParams   = [...container.querySelector('#y-params').selectedOptions].map(o => o.value);
+      const boxMode   = container.querySelector('#box-mode-toggle').checked;
+      const showConf  = container.querySelector('#conf-toggle').checked;
+      return { xAxis, groupBy, sectionBy, yParams, boxMode, showConf };
     }
 
     function updatePlots() {
-      const { xAxis, groupBy, yParams, boxMode } = getSelections();
+      const { xAxis, groupBy, sectionBy, yParams, boxMode, showConf } = getSelections();
       if (!yParams.length) { showToast('Select at least one parameter.', 'error'); return; }
+      if (xAxis === groupBy) { showToast('X axis and Group by must be different.', 'error'); return; }
+      if (sectionBy !== 'none' && (sectionBy === xAxis || sectionBy === groupBy)) {
+        showToast('Section by must differ from X axis and Group by.', 'error'); return;
+      }
 
-      setState({ _trendsBoxMode: boxMode });
+      setState({ _trendsBoxMode: boxMode, _trendsConf: showConf, _trendsGroupBy: groupBy, _trendsSection: sectionBy });
+
+      if (showConf && !results.some(r => Object.keys(r.confidence || {}).length > 0)) {
+        showToast('No confidence data — re-run fitting to generate uncertainty estimates.', 'warning');
+      }
 
       const grid = container.querySelector('#trend-plots-grid');
       grid.innerHTML = '';
 
-      for (const param of yParams) {
-        grid.insertAdjacentHTML('beforeend', `
-          <div class="trend-plot-card">
-            <div class="trend-plot-title">${param}</div>
-            <div class="trend-plot" id="trend-${param.replace(/[^a-zA-Z0-9]/g, '_')}"></div>
-          </div>
-        `);
+      // One synthetic null-section when no sectioner is set
+      const sectionValues = sectionBy === 'none'
+        ? [null]
+        : [...new Set(results.map(r => r.characterization?.[sectionBy]).filter(v => v != null))].sort((a, b) => a - b);
+
+      const plotJobs = [];
+
+      for (const secVal of sectionValues) {
+        const sectionResults = secVal === null
+          ? results
+          : results.filter(r => String(r.characterization?.[sectionBy]) === String(secVal));
+
+        let targetGrid;
+        if (secVal !== null) {
+          const secSafe = String(secVal).replace(/[^a-zA-Z0-9]/g, '_');
+          grid.insertAdjacentHTML('beforeend', `
+            <div class="trend-section">
+              <div class="trend-section-header">${sectionBy} ${secVal}</div>
+              <div class="trend-plots-grid" id="section-${secSafe}"></div>
+            </div>
+          `);
+          targetGrid = container.querySelector(`#section-${secSafe}`);
+        } else {
+          targetGrid = grid;
+        }
+
+        for (const param of yParams) {
+          const plotId = `trend-${param.replace(/[^a-zA-Z0-9]/g, '_')}-${secVal ?? 'all'}`;
+          targetGrid.insertAdjacentHTML('beforeend', `
+            <div class="trend-plot-card">
+              <div class="trend-plot-title">${param}</div>
+              <div class="trend-plot" id="${plotId}"></div>
+            </div>
+          `);
+          plotJobs.push({ plotId, param, sectionResults });
+        }
       }
 
       setTimeout(() => {
-        for (const param of yParams) {
-          plotTrend(param, xAxis, groupBy, charUnits, boxMode);
+        for (const { plotId, param, sectionResults } of plotJobs) {
+          const el = container.querySelector(`#${plotId}`);
+          plotTrend(param, el, sectionResults, xAxis, groupBy, charUnits, boxMode, showConf);
         }
       }, 50);
     }
@@ -146,31 +215,31 @@ export function TrendsView(container, { navigate, showToast }) {
       return `rgba(${r},${g},${b},${alpha})`;
     }
 
-    function plotTrend(param, xAxis, groupBy, charUnits = {}, boxMode = true) {
-      const safeId = param.replace(/[^a-zA-Z0-9]/g, '_');
-      const el = container.querySelector(`#trend-${safeId}`);
+    function plotTrend(param, el, activeResults, xAxis, groupBy, charUnits = {}, boxMode = true, showConf = false) {
       if (!el || typeof Plotly === 'undefined') return;
       el.style.height = '350px';
 
       const { scale: yScale, unit: yUnit } = paramInfo(param);
       const yLabel = yUnit ? `${param} (${yUnit})` : param;
 
-      // groups[groupKey][xNum] = [y1, y2, ...]
+      // groups[groupKey][xNum] = { ys: [y1, y2, ...], confs: [c1, c2, ...] }
       const groups = {};
-      for (const r of results) {
-        const xRaw = xAxis === 'File index' ? results.indexOf(r) : r.characterization?.[xAxis];
+      for (const r of activeResults) {
+        const xRaw = xAxis === 'File index' ? activeResults.indexOf(r) : r.characterization?.[xAxis];
         const yRaw = r.parameters?.[param];
         const yVal = yRaw != null ? yRaw * yScale : null;
         if (xRaw == null || yVal == null) continue;
 
+        const conf     = r.confidence?.[param];
         const groupKey = groupBy && r.characterization?.[groupBy] != null
           ? String(r.characterization[groupBy])
           : 'all';
-
         const xNum = Number(xRaw);
+
         if (!groups[groupKey]) groups[groupKey] = {};
-        if (!groups[groupKey][xNum]) groups[groupKey][xNum] = [];
-        groups[groupKey][xNum].push(yVal);
+        if (!groups[groupKey][xNum]) groups[groupKey][xNum] = { ys: [], confs: [] };
+        groups[groupKey][xNum].ys.push(yVal);
+        if (conf != null) groups[groupKey][xNum].confs.push(conf * yScale);
       }
 
       const groupKeys = Object.keys(groups).sort();
@@ -182,7 +251,7 @@ export function TrendsView(container, { navigate, showToast }) {
       const PALETTE = ['#4ecdc4', '#e05c5c', '#4a9ade', '#e67e22', '#9b59b6', '#27ae60', '#f0a500'];
 
       // Use box traces only when toggled on AND data actually has spread
-      const hasSpread = groupKeys.some(k => Object.values(groups[k]).some(ys => ys.length > 1));
+      const hasSpread = groupKeys.some(k => Object.values(groups[k]).some(bin => bin.ys.length > 1));
       const useBox = boxMode && hasSpread;
 
       const traces = [];
@@ -191,13 +260,15 @@ export function TrendsView(container, { navigate, showToast }) {
         const color = PALETTE[i % PALETTE.length];
         const xBins = groups[key];
         const sortedX = Object.keys(xBins).map(Number).sort((a, b) => a - b);
-        const name = key === 'all' ? param : `cell ${key}`;
+        const name = key === 'all' ? param
+          : groupBy === 'battery_id' ? (batteryLabels[key] ?? key)
+          : String(key);
 
         if (useBox) {
           // Flatten to per-point arrays for Plotly box grouping
           const boxX = [], boxY = [];
           for (const x of sortedX) {
-            for (const y of xBins[x]) { boxX.push(x); boxY.push(y); }
+            for (const y of xBins[x].ys) { boxX.push(x); boxY.push(y); }
           }
           traces.push({
             x: boxX, y: boxY,
@@ -213,7 +284,7 @@ export function TrendsView(container, { navigate, showToast }) {
         } else {
           traces.push({
             x: sortedX,
-            y: sortedX.map(x => { const ys = xBins[x]; return ys.reduce((s,v) => s+v, 0) / ys.length; }),
+            y: sortedX.map(x => { const ys = xBins[x].ys; return ys.reduce((s,v) => s+v, 0) / ys.length; }),
             type: 'scatter',
             mode: 'markers+lines',
             name,
@@ -228,7 +299,7 @@ export function TrendsView(container, { navigate, showToast }) {
         if (useBox) {
           const meanX = sortedX;
           const meanY = sortedX.map(x => {
-            const ys = xBins[x];
+            const ys = xBins[x].ys;
             return ys.reduce((s, v) => s + v, 0) / ys.length;
           });
           traces.push({
@@ -241,6 +312,30 @@ export function TrendsView(container, { navigate, showToast }) {
             showlegend:  false,
           });
         }
+
+        // Confidence overlay: individual points ± 1σ, shown in both scatter and box modes
+        if (showConf) {
+          const ptX = [], ptY = [], ptErr = [];
+          for (const x of sortedX) {
+            xBins[x].ys.forEach((y, idx) => {
+              ptX.push(x);
+              ptY.push(y);
+              ptErr.push(xBins[x].confs[idx] ?? null);
+            });
+          }
+          if (ptErr.some(v => v !== null)) {
+            traces.push({
+              x: ptX, y: ptY,
+              error_y: { type: 'data', array: ptErr, visible: true,
+                         color: hexToRgba(color, 0.6), thickness: 1.5, width: 4 },
+              type: 'scatter', mode: 'markers',
+              name: `${name} ±1σ`,
+              marker: { color, opacity: 0.75, size: 5 },
+              legendgroup: key,
+              showlegend: false,
+            });
+          }
+        }
       }
 
       const layout = {
@@ -252,7 +347,10 @@ export function TrendsView(container, { navigate, showToast }) {
         xaxis:  { title: (() => { const u = charUnits[xAxis] || defaultXUnit(xAxis); return u ? `${xAxis} (${u})` : xAxis; })(),
                    color: '#8892b0', gridcolor: '#2d3147', zeroline: false },
         yaxis:  { title: yLabel, color: '#8892b0', gridcolor: '#2d3147', zeroline: false },
-        legend: { orientation: 'h', x: 0.5, xanchor: 'center', y: -0.38, yanchor: 'top', font: { size: 9 } },
+        legend: { orientation: 'h', x: 0.5, xanchor: 'center', y: -0.38, yanchor: 'top', font: { size: 9 },
+                  ...(groupBy !== 'battery_id' && groupKeys[0] !== 'all'
+                    ? { title: { text: groupBy, font: { size: 10, color: '#8892b0' } } }
+                    : {}) },
         showlegend: groupKeys.length > 1 || groupKeys[0] !== 'all',
         boxmode: 'group',
       };
