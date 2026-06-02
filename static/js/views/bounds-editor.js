@@ -16,6 +16,16 @@ const DEFAULTS_WO = [
   { initial: 1.0,  lower: 0,   upper: null  },  // τ
 ];
 
+function checkPhysical(name, value) {
+  if (/^R\d/.test(name)  && value < 0)          return 'negative resistance';
+  if (/^C\d/.test(name)  && value <= 0)          return 'non-positive capacitance';
+  if (/^C\d/.test(name)  && value > 1)           return 'C > 1 F (check units)';
+  if (/^L\d/.test(name)  && value < 0)           return 'negative inductance';
+  if (/^CPE\d+_1/.test(name) && (value < 0 || value > 1)) return 'α outside 0–1';
+  if (/^(Wo|Ws|W)\d/.test(name) && value < 0)   return 'negative Warburg';
+  return null;
+}
+
 function guessDefault(paramName) {
   // paramName examples: R0, C1, CPE0_0, CPE0_1, Wo1_0, Wo1_1, W2, L0
   if (/^CPE\d+_0/i.test(paramName)) return DEFAULTS_CPE[0];
@@ -132,6 +142,13 @@ export function BoundsEditorView(container, { navigate, showToast }) {
       });
 
       if (!valid) { showToast('Fill in all initial values.', 'error'); return; }
+
+      const warnings = [];
+      paramInfo.forEach((p, i) => {
+        const w = checkPhysical(p.name, initial_guess[i]);
+        if (w) warnings.push(`${p.name}: ${w}`);
+      });
+      if (warnings.length) showToast(`Unphysical values — ${warnings.join('; ')}`, 'warning');
 
       const circuitConfig = {
         circuit_string: state.circuitString,
