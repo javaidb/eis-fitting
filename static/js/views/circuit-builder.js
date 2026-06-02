@@ -534,20 +534,26 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
     async onEnter() {
       const state = getState();
 
+      // Unconditionally reset all module-level working state from saved state.
+      // The !nodes.length guard caused stale circuit/history when navigating away and back.
+      _idCounter = 0;
+      nodes      = [];
+      history    = [];
+      histPtr    = -1;
+      selectedId = null;
+      dragState  = null;
+
+      if (state.circuitString) {
+        try { nodes = stringToTree(state.circuitString); } catch (_) {}
+      }
+      saveHistory();
+
       // Load elements list once
       if (!_elements.length) {
         try {
           const res = await fetch('/api/elements');
           _elements = await res.json();
         } catch (_) {}
-      }
-
-      // Restore circuit from state
-      if (state.circuitString && !nodes.length) {
-        try {
-          nodes = stringToTree(state.circuitString);
-          saveHistory();
-        } catch (_) { nodes = []; }
       }
 
       container.innerHTML = `
@@ -629,7 +635,6 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
         navigate(5);
       });
 
-      if (!history.length) saveHistory();
       renderCircuit();
     }
   };
