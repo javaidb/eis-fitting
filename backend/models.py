@@ -48,6 +48,7 @@ class FitResult(BaseModel):
     error: Optional[str] = None
     parameters: Dict[str, float] = {}
     confidence: Dict[str, float] = {}
+    frequencies: List[float] = []
     z_real_fit: List[float] = []
     z_imag_fit: List[float] = []
     z_real_data: List[float] = []
