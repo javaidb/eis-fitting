@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -15,6 +15,7 @@ _ROLE_PATTERNS: Dict[str, re.Pattern] = {
     "temperature": re.compile(r"temp|celsius|kelvin|°c|degc", re.IGNORECASE),
     "voltage":     re.compile(r"volt|voltage|_v$|^v$|^v_", re.IGNORECASE),
     "soc":         re.compile(r"\bsoc\b|state.of.charge", re.IGNORECASE),
+    "identifier":  re.compile(r"identifier|sample[_\s-]?id|test[_\s-]?id|\bid\b", re.IGNORECASE),
 }
 
 
@@ -73,7 +74,7 @@ def detect_column_roles(columns: List[str]) -> Dict[str, str]:
 def load_eis_data(
     filepath: str,
     column_map: ColumnMap,
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Union[float, str]]]:
     df = pd.read_csv(filepath)
 
     frequencies = df[column_map.frequency].to_numpy(dtype=float)
@@ -91,17 +92,64 @@ def load_eis_data(
     frequencies = frequencies[mask]
     Z = Z[mask]
 
-    char_values: Dict[str, float] = {}
-    for label, col_name in column_map.characterization.items():
-        if col_name in df.columns:
-            val = pd.to_numeric(df[col_name], errors="coerce").dropna()
-            if len(val):
-                char_values[label] = float(val.iloc[0])
-
-    # Inject battery_id from the parent subfolder name (trailing number, e.g. battery_02 → 2)
+    # Extract battery_id string early — needed for per-battery column lookup below.
     parent = Path(filepath).parent.name
-    m = re.search(r"(\d+)$", parent)
-    if m:
-        char_values["battery_id"] = float(m.group(1))
+    _bid_match = re.search(r"(\d+)$", parent)
+    battery_id_str = _bid_match.group(1) if _bid_match else None
+
+    # Process all labels: union of global and per-battery characterization keys.
+    pb_char = column_map.per_battery_characterization or {}
+    all_labels = list(column_map.characterization.keys()) + [
+        lbl for lbl in pb_char if lbl not in column_map.characterization
+    ]
+
+    char_values: Dict[str, Union[float, str]] = {}
+    for label in all_labels:
+        # Per-battery override takes precedence over global mapping.
+        col_name = column_map.characterization.get(label, '')
+        if battery_id_str and label in pb_char:
+            col_name = pb_char[label].get(battery_id_str, col_name)
+
+        if not col_name or col_name not in df.columns:
+            continue
+
+        series = df[col_name]
+
+        # Numeric characterization columns: optionally round to specified decimals,
+        # then average all numeric values, then round final average to 1 decimal place.
+        numeric_vals = pd.to_numeric(series, errors="coerce").dropna()
+        if len(numeric_vals):
+            # Apply per-parameter decimal rounding if specified
+            decimals = column_map.decimal_places.get(label, None)
+            if decimals is not None:
+                numeric_vals = numeric_vals.round(decimals)
+            # Average and round final result to 1 decimal
+            char_values[label] = round(float(numeric_vals.mean()), 1)
+            continue
+
+        # Non-numeric characterization columns: use the first non-empty value.
+        non_empty = series.dropna().astype(str).str.strip()
+        non_empty = non_empty[non_empty != ""]
+        if len(non_empty):
+            char_values[label] = non_empty.iloc[0]
+
+    # Fallback: if an identifier-like column exists but was not mapped,
+    # extract it automatically so Trends can still expose it.
+    if "identifier" not in char_values:
+        id_col = next((c for c in df.columns if _ROLE_PATTERNS["identifier"].search(str(c))), None)
+        if id_col is not None:
+            series = df[id_col]
+            numeric_vals = pd.to_numeric(series, errors="coerce").dropna()
+            if len(numeric_vals):
+                char_values["identifier"] = round(float(numeric_vals.mean()), 1)
+            else:
+                non_empty = series.dropna().astype(str).str.strip()
+                non_empty = non_empty[non_empty != ""]
+                if len(non_empty):
+                    char_values["identifier"] = non_empty.iloc[0]
+
+    # Inject battery_id (already extracted above as battery_id_str)
+    if battery_id_str:
+        char_values["battery_id"] = float(battery_id_str)
 
     return frequencies, Z, char_values
