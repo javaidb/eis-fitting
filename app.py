@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.drt import drt_batch_stream
 from backend.file_handler import scan_folder
 from backend.fitting import fit_batch_stream, get_param_names
-from backend.models import DRTRequest, FitRequest, ParseCircuitRequest, ScanFolderRequest
+from backend.models import DRTRequest, FitRequest, FreqRangeRequest, ParseCircuitRequest, ScanFolderRequest
 
 app = FastAPI(title="EIS Fitting")
 
@@ -96,6 +96,21 @@ async def api_parse_circuit(request: ParseCircuitRequest):
         return {"param_names": names, "param_units": units}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid circuit: {exc}")
+
+
+@app.post("/api/freq-range")
+async def api_freq_range(request: FreqRangeRequest):
+    import pandas as pd
+    try:
+        df = pd.read_csv(request.path, usecols=[request.frequency_column])
+        freqs = pd.to_numeric(df[request.frequency_column], errors="coerce").dropna()
+        if freqs.empty:
+            raise HTTPException(status_code=400, detail="No valid frequency values found")
+        return {"freq_min": float(freqs.min()), "freq_max": float(freqs.max())}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/api/fit")
