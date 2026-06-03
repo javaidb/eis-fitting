@@ -68,18 +68,19 @@ document.getElementById('step-nav').addEventListener('click', e => {
 function saveProject() {
   const s = getState();
   const project = {
-    version:       1,
-    files:         s.files,
-    columnMap:     s.columnMap,
-    charUnits:     s.charUnits,
-    circuitString: s.circuitString,
-    circuitTree:   s.circuitTree,
-    circuitConfig: s.circuitConfig,
-    fitResults:    s.fitResults,
-    fitCacheKey:   s.fitCacheKey,
-    fitTimeout:    s.fitTimeout,
-    drtLambda:     s.drtLambda,
-    maxStep:       s.maxStep,
+    version:            1,
+    files:              s.files,
+    columnMap:          s.columnMap,
+    charUnits:          s.charUnits,
+    charDecimalPlaces:  s.charDecimalPlaces,
+    circuitString:      s.circuitString,
+    circuitTree:        s.circuitTree,
+    circuitConfig:      s.circuitConfig,
+    fitResults:         s.fitResults,
+    fitCacheKey:        s.fitCacheKey,
+    fitTimeout:         s.fitTimeout,
+    drtLambda:          s.drtLambda,
+    maxStep:            s.maxStep,
   };
   const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
   const url  = URL.createObjectURL(blob);
@@ -97,18 +98,19 @@ function loadProject(file) {
       const proj = JSON.parse(e.target.result);
       if (!proj.version) throw new Error('Not a valid EIS project file');
       setState({
-        files:         proj.files         ?? [],
-        columnMap:     proj.columnMap     ?? null,
-        charUnits:     proj.charUnits     ?? {},
-        circuitString: proj.circuitString ?? '',
-        circuitTree:   proj.circuitTree   ?? { nodes: [] },
-        circuitConfig: proj.circuitConfig ?? null,
-        fitResults:    proj.fitResults    ?? [],
-        fitCacheKey:   proj.fitCacheKey   ?? null,
-        fitTimeout:    proj.fitTimeout    ?? 60,
-        drtLambda:     proj.drtLambda     ?? 1e-3,
-        maxStep:       proj.maxStep       ?? 1,
-        step:          1,
+        files:              proj.files              ?? [],
+        columnMap:          proj.columnMap          ?? null,
+        charUnits:          proj.charUnits          ?? {},
+        charDecimalPlaces:  proj.charDecimalPlaces  ?? {},
+        circuitString:      proj.circuitString      ?? '',
+        circuitTree:        proj.circuitTree        ?? { nodes: [] },
+        circuitConfig:      proj.circuitConfig      ?? null,
+        fitResults:         proj.fitResults         ?? [],
+        fitCacheKey:        proj.fitCacheKey        ?? null,
+        fitTimeout:         proj.fitTimeout         ?? 60,
+        drtLambda:          proj.drtLambda          ?? 1e-3,
+        maxStep:            proj.maxStep            ?? 1,
+        step:               1,
       });
       navigate(1);
       showToast('Project loaded.', 'success');
