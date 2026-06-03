@@ -12,6 +12,7 @@ const _defaults = {
   circuitTree: { nodes: [] },
   circuitString: '',
   circuitConfig: null,
+  optimizeConfig: { enabled: false, rc_min: 1, rc_max: 5, pair_types: ['CPE'], criterion: 'AIC', n_restarts: 1 },
   fitResults: [],
   fitCacheKey: null,
   drtResults: [],
@@ -19,6 +20,9 @@ const _defaults = {
   drtExpBattery: null,
   drtExpIdentifier: null,
   charUnits: {},
+  charDecimalPlaces: {},
+  fitFreqMin: null,
+  fitFreqMax: null,
   fitting: false,
   _sv: 2,           // schema version — bump when step numbering changes
 };
