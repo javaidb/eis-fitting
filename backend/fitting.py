@@ -2,15 +2,38 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import AsyncGenerator, Dict
+from typing import AsyncGenerator, Dict, List, Optional, Union
 
 import numpy as np
+from numpy.random import default_rng
 from impedance.models.circuits import CustomCircuit
 
 from .file_handler import load_eis_data
-from .models import CircuitConfig, FitRequest, FitResult
+from .models import CircuitConfig, ColumnMap, FitRequest, FitResult, OptimizeConfig, VariantResult
 
 _TWO_PARAM = {"CPE", "Wo", "Ws", "La"}
+
+# Default (initial, lower, upper) per parameter type key.
+# Type key is element-name + suffix, e.g. "R", "CPE_0", "CPE_1", "Wo_1".
+_PARAM_DEFAULTS: Dict[str, tuple[float, float, float]] = {
+    'R':     (0.01,  0.0, float('inf')),
+    'C':     (1e-5,  0.0, float('inf')),
+    'L':     (1e-6,  0.0, float('inf')),
+    'CPE_0': (1e-5,  0.0, float('inf')),
+    'CPE_1': (0.8,   0.0, 1.0),
+    'W':     (1.0,   0.0, float('inf')),
+    'Wo_0':  (0.01,  0.0, float('inf')),
+    'Wo_1':  (1.0,   0.0, float('inf')),
+    'Wo_2':  (0.5,   0.0, 1.0),
+    'Ws_0':  (0.01,  0.0, float('inf')),
+    'Ws_1':  (1.0,   0.0, float('inf')),
+    'Ws_2':  (0.5,   0.0, 1.0),
+    'La_0':  (1e-6,  0.0, float('inf')),
+    'La_1':  (0.01,  0.0, float('inf')),
+}
+
+# Matches 2-element RC-pair parallel blocks: p(R<n>,CPE<n>) or p(R<n>,C<n>)
+_PAIR_RE = re.compile(r'p\(R\d+,(?:CPE|C)\d+\)')
 
 
 def count_circuit_params(circuit_string: str) -> int:
@@ -25,55 +48,256 @@ def get_param_names(circuit_string: str) -> tuple[list[str], list[str]]:
     return list(names), list(units)
 
 
+def _param_type_key(name: str) -> str:
+    """'CPE1_0' → 'CPE_0', 'R2' → 'R', 'Wo0_1' → 'Wo_1'."""
+    m = re.match(r'^([A-Za-z]+)\d+(_\d+)?$', name)
+    if not m:
+        return name
+    return m.group(1) + (m.group(2) or '')
+
+
+def _build_param_lookup(
+    circuit_config: CircuitConfig,
+) -> Dict[str, tuple[float, float, float]]:
+    """Build name → (initial, lower, upper) from user-configured circuit."""
+    lookup: Dict[str, tuple[float, float, float]] = {}
+    for i, name in enumerate(circuit_config.param_names):
+        initial = circuit_config.initial_guess[i] if i < len(circuit_config.initial_guess) else 1.0
+        lower   = circuit_config.lower_bounds[i]  if i < len(circuit_config.lower_bounds)  else None
+        upper   = circuit_config.upper_bounds[i]  if i < len(circuit_config.upper_bounds)  else None
+        lookup[name] = (
+            initial,
+            lower if lower is not None else 0.0,
+            upper if upper is not None else float('inf'),
+        )
+    return lookup
+
+
+def _resolve_bounds(
+    param_names: List[str],
+    name_lookup: Dict[str, tuple[float, float, float]],
+) -> tuple[List[float], List[float], List[float]]:
+    """Resolve initial/lower/upper for each param: user lookup first, then type defaults."""
+    initials, lowers, uppers = [], [], []
+    for name in param_names:
+        if name in name_lookup:
+            i, l, u = name_lookup[name]
+        else:
+            key = _param_type_key(name)
+            i, l, u = _PARAM_DEFAULTS.get(key, (1.0, 0.0, float('inf')))
+        initials.append(i)
+        lowers.append(l)
+        uppers.append(u)
+    return initials, lowers, uppers
+
+
+def _strip_rc_pairs(circuit_string: str) -> str:
+    """Remove all p(R,CPE) and p(R,C) pair blocks (with surrounding dashes)."""
+    result = circuit_string
+    prev = None
+    while result != prev:
+        prev = result
+        result = re.sub(r'-' + _PAIR_RE.pattern, '', result)   # trailing pair: X-p(...)
+        result = re.sub(_PAIR_RE.pattern + r'-', '', result)   # leading pair:  p(...)-X
+        result = re.sub(r'^' + _PAIR_RE.pattern + r'$', '', result)  # sole element
+    return result
+
+
+def generate_circuit_variant(
+    circuit_string: str,
+    target_rc_count: int,
+    pair_type: str = "CPE",
+) -> str | None:
+    """Generate circuit variant with `target_rc_count` RC pairs of `pair_type`.
+
+    Strips existing RC pairs from the circuit string, then inserts the requested
+    number of new pairs before any Warburg element (or at the end).  Uses the
+    same numeric index for both R and the pair element so that name-based bounds
+    lookup re-uses user-configured values for matching pairs.
+    """
+    frame = _strip_rc_pairs(circuit_string)
+    if not frame:
+        return None
+
+    if target_rc_count == 0:
+        return frame
+
+    r_indices_in_frame = [int(m) for m in re.findall(r'R(\d+)', frame)]
+    max_r = max(r_indices_in_frame) if r_indices_in_frame else -1
+
+    pairs = [f"-p(R{max_r + 1 + i},{pair_type}{max_r + 1 + i})" for i in range(target_rc_count)]
+
+    warburg_match = re.search(r'-(?:Wo|Ws|W)\d+$', frame)
+    if warburg_match:
+        pos = warburg_match.start()
+        return frame[:pos] + ''.join(pairs) + frame[pos:]
+    return frame + ''.join(pairs)
+
+
+def _sample_initial_guess(
+    initials: List[float],
+    lowers: List[float],
+    uppers: List[float],
+    rng: np.random.Generator,
+) -> List[float]:
+    """Log-uniform sample within [lower, upper] for each parameter.
+
+    Falls back gracefully when bounds are degenerate (lower == upper, or upper
+    is infinite — in that case perturbs the initial value by a random factor).
+    """
+    guess = []
+    for i0, lo, hi in zip(initials, lowers, uppers):
+        if lo == hi:
+            guess.append(lo)
+            continue
+        lo_pos = max(lo, 1e-30)
+        if np.isinf(hi):
+            # No upper bound: perturb initial by ×[0.1, 10] in log space
+            center = max(i0, lo_pos)
+            factor = 10 ** rng.uniform(-1, 1)
+            guess.append(float(np.clip(center * factor, lo_pos, None)))
+        else:
+            # Both bounds finite: log-uniform sample
+            log_lo = np.log10(max(lo_pos, hi * 1e-10))
+            log_hi = np.log10(max(hi, lo_pos * 10))
+            guess.append(float(10 ** rng.uniform(log_lo, log_hi)))
+    return guess
+
+
+def _compute_aic_bic(Z: np.ndarray, Z_fit: np.ndarray, k: int) -> tuple[float, float]:
+    """AIC and BIC for complex-impedance regression (real+imag as separate observations)."""
+    n = 2 * len(Z)
+    rss = float(np.sum((Z.real - Z_fit.real) ** 2 + (Z.imag - Z_fit.imag) ** 2))
+    if rss <= 0 or n <= 0:
+        return float('-inf'), float('-inf')
+    ll = n * np.log(rss / n)
+    return float(ll + 2 * k), float(ll + k * np.log(n))
+
+
 def fit_single(
     frequencies: np.ndarray,
     Z: np.ndarray,
     circuit_config: CircuitConfig,
-    char_values: Dict[str, float],
+    char_values: Dict[str, Union[float, str]],
     filename: str,
+    filepath: str,
+    optimize_config: OptimizeConfig | None = None,
+    column_map: ColumnMap | None = None,
 ) -> FitResult:
-    lower = [b if b is not None else 0.0 for b in circuit_config.lower_bounds]
-    upper = [b if b is not None else np.inf for b in circuit_config.upper_bounds]
+    allowed_char = (set(column_map.characterization.keys()) if column_map else set()) | {'identifier', 'battery_id'}
+    clean_char = {k: v for k, v in char_values.items() if k in allowed_char}
 
-    try:
-        circuit = CustomCircuit(
-            circuit=circuit_config.circuit_string,
-            initial_guess=circuit_config.initial_guess,
-        )
-        circuit.fit(frequencies, Z, bounds=(lower, upper))
+    name_lookup = _build_param_lookup(circuit_config)
+    optimize = optimize_config is not None and optimize_config.enabled
+    criterion = (optimize_config.criterion if optimize_config else None) or 'AIC'
 
-        Z_fit = circuit.predict(frequencies)
-        params = dict(zip(circuit_config.param_names, circuit.parameters_.tolist()))
+    # Build candidate list: (circuit_string, label_for_variant)
+    if optimize:
+        candidates: list[tuple[str, str]] = []
+        for rc in range(optimize_config.rc_min, optimize_config.rc_max + 1):
+            for pt in (optimize_config.pair_types or ['CPE']):
+                variant = generate_circuit_variant(circuit_config.circuit_string, rc, pt)
+                if variant:
+                    candidates.append((variant, f"{rc}×{pt}"))
+    else:
+        candidates = [(circuit_config.circuit_string, 'fixed')]
 
-        conf: Dict[str, float] = {}
-        if circuit.conf_ is not None:
-            conf = dict(zip(circuit_config.param_names, circuit.conf_.tolist()))
+    best_result: FitResult | None = None
+    best_score = float('inf')
+    variants_tried: List[VariantResult] = []
+    n_restarts = max(1, (optimize_config.n_restarts if optimize_config else 1))
+    rng = default_rng()
 
-        residual = float(np.mean(np.abs(Z - Z_fit) / (np.abs(Z) + 1e-12)))
+    for variant_circuit, _ in candidates:
+        try:
+            param_names, _ = get_param_names(variant_circuit)
+            initials, lowers, uppers = _resolve_bounds(param_names, name_lookup)
+            k = len(param_names)
 
-        return FitResult(
-            filename=filename,
-            success=True,
-            parameters=params,
-            confidence=conf,
-            frequencies=frequencies.tolist(),
-            z_real_fit=Z_fit.real.tolist(),
-            z_imag_fit=Z_fit.imag.tolist(),
-            z_real_data=Z.real.tolist(),
-            z_imag_data=Z.imag.tolist(),
-            characterization=char_values,
-            residual=residual,
-        )
-    except Exception as exc:
-        return FitResult(
-            filename=filename,
-            success=False,
-            error=str(exc),
-            frequencies=frequencies.tolist(),
-            z_real_data=Z.real.tolist(),
-            z_imag_data=Z.imag.tolist(),
-            characterization=char_values,
-        )
+            # Multi-start: try n_restarts initialisations, keep the lowest-RSS fit.
+            best_rss = float('inf')
+            best_parameters: list[float] = []
+            best_conf_raw: list[float] | None = None
+            Z_fit: np.ndarray = np.zeros_like(Z)
+
+            for restart in range(n_restarts):
+                guess = initials if restart == 0 else _sample_initial_guess(initials, lowers, uppers, rng)
+                try:
+                    c = CustomCircuit(circuit=variant_circuit, initial_guess=guess)
+                    c.fit(frequencies, Z, bounds=(lowers, uppers))
+                    Z_try = c.predict(frequencies)
+                    rss = float(np.sum((Z.real - Z_try.real) ** 2 + (Z.imag - Z_try.imag) ** 2))
+                    if rss < best_rss:
+                        best_rss = rss
+                        best_parameters = c.parameters_.tolist()
+                        best_conf_raw = c.conf_.tolist() if c.conf_ is not None else None
+                        Z_fit = Z_try
+                except Exception:
+                    continue
+
+            if not best_parameters:
+                raise RuntimeError("all restarts failed")
+
+            residual = float(np.mean(np.abs(Z - Z_fit) / (np.abs(Z) + 1e-12)))
+            aic, bic = _compute_aic_bic(Z, Z_fit, k)
+            score = aic if criterion == 'AIC' else bic
+
+            params = dict(zip(param_names, best_parameters))
+            conf: Dict[str, float] = {}
+            if best_conf_raw is not None:
+                conf = dict(zip(param_names, best_conf_raw))
+
+            variants_tried.append(VariantResult(
+                circuit_string=variant_circuit,
+                n_params=k,
+                residual=residual,
+                aic=aic,
+                bic=bic,
+                success=True,
+            ))
+
+            if score < best_score:
+                best_score = score
+                best_result = FitResult(
+                    filename=filename,
+                    path=filepath,
+                    success=True,
+                    parameters=params,
+                    confidence=conf,
+                    frequencies=frequencies.tolist(),
+                    z_real_fit=Z_fit.real.tolist(),
+                    z_imag_fit=Z_fit.imag.tolist(),
+                    z_real_data=Z.real.tolist(),
+                    z_imag_data=Z.imag.tolist(),
+                    characterization=clean_char,
+                    residual=residual,
+                    circuit_used=variant_circuit,
+                )
+
+        except Exception as exc:
+            variants_tried.append(VariantResult(
+                circuit_string=variant_circuit,
+                n_params=0,
+                success=False,
+                error=str(exc),
+            ))
+
+    if best_result is not None:
+        best_result.variants_tried = variants_tried
+        return best_result
+
+    return FitResult(
+        filename=filename,
+        path=filepath,
+        success=False,
+        error="All circuit variants failed to fit",
+        frequencies=frequencies.tolist(),
+        z_real_data=Z.real.tolist(),
+        z_imag_data=Z.imag.tolist(),
+        characterization=clean_char,
+        circuit_used=circuit_config.circuit_string,
+        variants_tried=variants_tried,
+    )
 
 
 async def fit_batch_stream(request: FitRequest) -> AsyncGenerator[str, None]:
@@ -86,16 +310,45 @@ async def fit_batch_stream(request: FitRequest) -> AsyncGenerator[str, None]:
             frequencies, Z, char_values = await asyncio.to_thread(
                 load_eis_data, file_info.path, request.column_map
             )
+
+            # Apply frequency range filter if requested
+            mask = np.ones(len(frequencies), dtype=bool)
+            if request.freq_min is not None:
+                mask &= frequencies >= request.freq_min
+            if request.freq_max is not None:
+                mask &= frequencies <= request.freq_max
+            if not mask.all():
+                if not mask.any():
+                    raise ValueError(
+                        f"No data points remain after applying frequency range "
+                        f"{request.freq_min}–{request.freq_max} Hz"
+                    )
+                frequencies = frequencies[mask]
+                Z = Z[mask]
+
             result = await asyncio.wait_for(
                 asyncio.to_thread(
-                    fit_single, frequencies, Z, request.circuit_config, char_values, file_info.filename
+                    fit_single,
+                    frequencies, Z,
+                    request.circuit_config,
+                    char_values,
+                    file_info.filename,
+                    file_info.path,
+                    request.optimize_config,
+                    request.column_map,
                 ),
                 timeout=request.fit_timeout,
             )
         except asyncio.TimeoutError:
-            result = FitResult(filename=file_info.filename, success=False, error=f"Fit timed out after {request.fit_timeout:g} s")
+            result = FitResult(
+                filename=file_info.filename, path=file_info.path,
+                success=False, error=f"Fit timed out after {request.fit_timeout:g} s",
+            )
         except Exception as exc:
-            result = FitResult(filename=file_info.filename, success=False, error=str(exc))
+            result = FitResult(
+                filename=file_info.filename, path=file_info.path,
+                success=False, error=str(exc),
+            )
 
         yield f"data: {json.dumps({'event': 'result', 'data': result.model_dump()})}\n\n"
 
