@@ -17,14 +17,83 @@ export function TrendsView(container, { navigate, showToast }) {
       return;
     }
 
-    // Collect all parameter names and characterization labels
+    // Collect all parameter names and characterization labels.
+    // Build a union from both fit results and the saved column mapping so
+    // sparse fields (e.g. identifier present in only some files) still appear.
     const paramNames = Object.keys(results[0].parameters);
-    const charLabels = Object.keys(results[0].characterization || {});
+    const charLabelSet = new Set();
+
+    function parseIdentifierFromText(text) {
+      if (!text) return null;
+      const s = String(text);
+
+      // Common patterns: [...], _123 suffix, id123 / identifier_123
+      let m = s.match(/\[(\d+)\]/);
+      if (m) return Number(m[1]);
+      m = s.match(/(?:^|[_-])(\d+)(?:\.[^.]+)?$/);
+      if (m) return Number(m[1]);
+      m = s.match(/(?:identifier|sample[_\s-]?id|test[_\s-]?id|\bid\b)[_\s-]*([A-Za-z0-9]+)/i);
+      if (m) {
+        const n = Number(m[1]);
+        return Number.isFinite(n) ? n : m[1];
+      }
+      return null;
+    }
+
+    function getIdentifierValue(r) {
+      const ch = r.characterization || {};
+      const direct = ch.identifier ?? ch.Identifier;
+      if (direct != null && String(direct).trim() !== '') return direct;
+
+      for (const [k, v] of Object.entries(ch)) {
+        if (/identifier|sample[_\s-]?id|test[_\s-]?id|\bid\b/i.test(k) && v != null && String(v).trim() !== '') {
+          return v;
+        }
+      }
+
+      const pathVal = parseIdentifierFromText(r.path || '');
+      if (pathVal != null) return pathVal;
+
+      return parseIdentifierFromText(r.filename || '');
+    }
+
+    function getCharValue(r, label) {
+      if (label === 'File index') return null;
+      if (label === 'identifier') return getIdentifierValue(r);
+
+      const ch = r.characterization || {};
+      if (ch[label] != null) return ch[label];
+
+      // Case-insensitive fallback for label mismatches (e.g., Identifier vs identifier)
+      const target = String(label).toLowerCase();
+      for (const [k, v] of Object.entries(ch)) {
+        if (String(k).toLowerCase() === target) return v;
+      }
+      return null;
+    }
+
+    results.forEach(r => {
+      Object.keys(r.characterization || {}).forEach(k => {
+        // Only include if explicitly mapped in column mapper, or if it's identifier/battery_id
+        const inMapping = Object.keys(state.columnMap?.characterization || {}).includes(k);
+        if (inMapping || k === 'identifier' || k === 'battery_id') {
+          charLabelSet.add(k);
+        }
+      });
+    });
+    Object.keys(state.columnMap?.characterization || {}).forEach(k => charLabelSet.add(k));
+
+    // Ensure identifier is available when it can be derived from any result.
+    if (results.some(r => getIdentifierValue(r) != null)) {
+      charLabelSet.add('identifier');
+    }
+
+    const charLabels = [...charLabelSet];
 
     const xOptions = charLabels.length ? charLabels : ['File index'];
 
     const state2 = getState();
-    const savedX        = state2._trendsX || xOptions[0];
+    const savedX        = (state2._trendsX && xOptions.includes(state2._trendsX)) ? state2._trendsX : xOptions[0];
     const savedY        = state2._trendsY || paramNames.slice(0, Math.min(paramNames.length, 4));
     const charUnits     = state2.charUnits || {};
 
@@ -40,7 +109,9 @@ export function TrendsView(container, { navigate, showToast }) {
     });
     const savedBoxMode  = state2._trendsBoxMode !== false; // default true
     const savedConf     = state2._trendsConf    === true;  // default false
-    const savedGroupBy  = state2._trendsGroupBy ?? (charLabels.includes('battery_id') ? 'battery_id' : charLabels[0]);
+    const savedGroupBy  = (state2._trendsGroupBy && charLabels.includes(state2._trendsGroupBy))
+      ? state2._trendsGroupBy
+      : (charLabels.includes('battery_id') ? 'battery_id' : charLabels[0]);
     const savedSection  = state2._trendsSection  ?? 'none';
 
     container.innerHTML = `
@@ -139,14 +210,14 @@ export function TrendsView(container, { navigate, showToast }) {
       // One synthetic null-section when no sectioner is set
       const sectionValues = sectionBy === 'none'
         ? [null]
-        : [...new Set(results.map(r => r.characterization?.[sectionBy]).filter(v => v != null))].sort((a, b) => a - b);
+        : [...new Set(results.map(r => getCharValue(r, sectionBy)).filter(v => v != null))].sort((a, b) => Number(a) - Number(b));
 
       const plotJobs = [];
 
       for (const secVal of sectionValues) {
         const sectionResults = secVal === null
           ? results
-          : results.filter(r => String(r.characterization?.[sectionBy]) === String(secVal));
+          : results.filter(r => String(getCharValue(r, sectionBy)) === String(secVal));
 
         let targetGrid;
         if (secVal !== null) {
@@ -225,15 +296,17 @@ export function TrendsView(container, { navigate, showToast }) {
       // groups[groupKey][xNum] = { ys: [y1, y2, ...], confs: [c1, c2, ...] }
       const groups = {};
       for (const r of activeResults) {
-        const xRaw = xAxis === 'File index' ? activeResults.indexOf(r) : r.characterization?.[xAxis];
+        const xRaw = xAxis === 'File index' ? activeResults.indexOf(r) : getCharValue(r, xAxis);
         const yRaw = r.parameters?.[param];
         const yVal = yRaw != null ? yRaw * yScale : null;
         if (xRaw == null || yVal == null) continue;
 
         const conf     = r.confidence?.[param];
-        const groupKey = groupBy && r.characterization?.[groupBy] != null
-          ? String(r.characterization[groupBy])
-          : 'all';
+        const groupVal = groupBy ? getCharValue(r, groupBy) : null;
+        // If a grouping axis is selected, skip rows missing that grouping value.
+        // This avoids creating a fallback "all" series that can be mislabeled as a parameter name.
+        if (groupBy && (groupVal == null || String(groupVal).trim() === '')) continue;
+        const groupKey = groupBy ? String(groupVal) : 'all';
         const xNum = Number(xRaw);
 
         if (!groups[groupKey]) groups[groupKey] = {};
