@@ -137,7 +137,9 @@ async def drt_batch_stream(request: DRTRequest) -> AsyncGenerator[str, None]:
             )
             result.filename = file_info.filename
             result.success = True
-            result.characterization = char_values
+            # Only include mapped characterization + special fields (identifier, battery_id)
+            allowed_keys = set(request.column_map.characterization.keys()) | {'identifier', 'battery_id'}
+            result.characterization = {k: v for k, v in char_values.items() if k in allowed_keys}
         except Exception as exc:
             result = DRTResult(filename=file_info.filename, success=False, error=str(exc))
 
