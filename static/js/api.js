@@ -67,6 +67,14 @@ export async function* streamDRT(request) {
       }
     }
   }
+
+  // Flush any trailing SSE frame that wasn't terminated by a blank line.
+  const tail = buffer.trim();
+  if (tail.startsWith('data: ')) {
+    try {
+      yield JSON.parse(tail.slice(6));
+    } catch (_) { /* malformed */ }
+  }
 }
 
 // Returns an async generator yielding parsed SSE event objects.
@@ -100,5 +108,13 @@ export async function* streamFitting(request, signal) {
         } catch (_) { /* malformed */ }
       }
     }
+  }
+
+  // Flush any trailing SSE frame that wasn't terminated by a blank line.
+  const tail = buffer.trim();
+  if (tail.startsWith('data: ')) {
+    try {
+      yield JSON.parse(tail.slice(6));
+    } catch (_) { /* malformed */ }
   }
 }
