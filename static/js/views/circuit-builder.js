@@ -14,6 +14,18 @@ const COLORS = {
   CPE: '#e67e22', W: '#27ae60', Wo: '#1abc9c', Ws: '#16a085',
 };
 
+// Mirror of backend _strip_rc_pairs — used for the frame preview in optimize mode.
+function stripRcPairsFn(s) {
+  let r = s, prev;
+  do {
+    prev = r;
+    r = r.replace(/-p\(R\d+,(?:CPE|C)\d+\)/g, '')
+         .replace(/p\(R\d+,(?:CPE|C)\d+\)-/g, '')
+         .replace(/^p\(R\d+,(?:CPE|C)\d+\)$/g, '');
+  } while (r !== prev);
+  return r.replace(/^-+|-+$/g, '') || '—';
+}
+
 // ── ID counter ───────────────────────────────────────────────────
 let _idCounter = 0;
 function newId() { return `n${++_idCounter}`; }
@@ -556,32 +568,135 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
         } catch (_) {}
       }
 
-      container.innerHTML = `
-        <div class="section-header">Build Circuit</div>
-        <div class="section-sub">Drag components from the palette onto the canvas, or click to append. Drop on an existing component to create a parallel branch.</div>
+      const oc = state.optimizeConfig ?? { enabled: false, rc_min: 1, rc_max: 5, pair_types: ['CPE'], criterion: 'AIC' };
+      const fitModeVal = oc.enabled ? 'optimize' : 'fixed';
+      const hasCPE     = (oc.pair_types ?? ['CPE']).includes('CPE');
+      const hasC       = (oc.pair_types ?? []).includes('C');
+      const isAIC      = (oc.criterion ?? 'AIC') === 'AIC';
 
-        <div class="circuit-workspace">
-          <div class="palette">
-            <div class="palette-title">Components</div>
-            ${_elements.map(el => `
-              <div class="palette-item" data-element="${el.symbol}" title="${el.description}">
-                <div class="palette-dot" style="background:${el.color}"></div>
-                <span>${el.symbol}</span>
+      const modeTabStyle = (active) =>
+        `padding:6px 18px;font-size:13px;font-weight:600;border:1px solid var(--border);cursor:pointer;transition:background .15s,color .15s;` +
+        (active
+          ? `background:var(--accent);color:#fff;border-color:var(--accent);`
+          : `background:var(--surface);color:var(--text-muted);`);
+
+      container.innerHTML = `
+        <div class="section-header">Circuit / Fitting Mode</div>
+
+        <!-- Mode selector -->
+        <div style="display:flex;margin-bottom:22px;">
+          <button id="mode-fixed-btn" style="${modeTabStyle(fitModeVal === 'fixed')}border-radius:6px 0 0 6px;">
+            Fixed Circuit
+          </button>
+          <button id="mode-optimize-btn" style="${modeTabStyle(fitModeVal === 'optimize')}border-radius:0 6px 6px 0;border-left:none;">
+            Auto-Optimize
+          </button>
+        </div>
+
+        <!-- Fixed: full circuit builder -->
+        <div id="section-fixed" style="display:${fitModeVal === 'fixed' ? 'block' : 'none'};">
+          <div class="section-sub" style="margin-bottom:14px;">Drag components from the palette onto the canvas, or click to append. Drop on an existing component to create a parallel branch.</div>
+          <div class="circuit-workspace">
+            <div class="palette">
+              <div class="palette-title">Components</div>
+              ${_elements.map(el => `
+                <div class="palette-item" data-element="${el.symbol}" title="${el.description}">
+                  <div class="palette-dot" style="background:${el.color}"></div>
+                  <span>${el.symbol}</span>
+                </div>
+              `).join('')}
+            </div>
+            <div class="canvas-area">
+              <div class="circuit-svg-container" id="svg-container">
+                <svg id="circuit-svg" xmlns="http://www.w3.org/2000/svg"></svg>
               </div>
-            `).join('')}
+              <div class="circuit-toolbar">
+                <button class="btn btn-secondary btn-sm" id="undo-btn" title="Undo">↩ Undo</button>
+                <button class="btn btn-secondary btn-sm" id="redo-btn" title="Redo">↪ Redo</button>
+                <button class="btn btn-danger btn-sm" id="clear-btn">✕ Clear</button>
+                <input type="text" class="circuit-string-input" id="circuit-string" placeholder="R0-p(R1,C1)" value="${state.circuitString || ''}">
+                <button class="btn btn-secondary btn-sm" id="apply-str-btn">Apply</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Optimize: params only -->
+        <div id="section-optimize" style="display:${fitModeVal === 'optimize' ? 'block' : 'none'};">
+          <div class="section-sub" style="margin-bottom:18px;">
+            The optimizer strips any existing RC pairs from your circuit and searches over the range you specify.
+            Set the frame circuit (e.g. <code>R0-W0</code>) via the Fixed tab — or leave it as-is.
           </div>
 
-          <div class="canvas-area">
-            <div class="circuit-svg-container" id="svg-container">
-              <svg id="circuit-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+          <div style="display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start;padding:20px;background:var(--surface-raised,var(--surface));border-radius:8px;border:1px solid var(--border);">
+
+            <div>
+              <div style="font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:9px;">RC pairs to search</div>
+              <div style="display:flex;align-items:center;gap:8px;font-size:13px;">
+                <span style="color:var(--text-muted);">min</span>
+                <input type="number" id="rc-min" value="${oc.rc_min ?? 1}" min="0" max="10"
+                       style="width:56px;padding:5px 7px;background:var(--surface);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:13px;text-align:right;">
+                <span style="color:var(--text-muted);">to max</span>
+                <input type="number" id="rc-max" value="${oc.rc_max ?? 5}" min="1" max="10"
+                       style="width:56px;padding:5px 7px;background:var(--surface);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:13px;text-align:right;">
+              </div>
             </div>
 
-            <div class="circuit-toolbar">
-              <button class="btn btn-secondary btn-sm" id="undo-btn" title="Undo">↩ Undo</button>
-              <button class="btn btn-secondary btn-sm" id="redo-btn" title="Redo">↪ Redo</button>
-              <button class="btn btn-danger btn-sm" id="clear-btn">✕ Clear</button>
-              <input type="text" class="circuit-string-input" id="circuit-string" placeholder="R0-p(R1,C1)" value="${state.circuitString || ''}">
-              <button class="btn btn-secondary btn-sm" id="apply-str-btn">Apply</button>
+            <div>
+              <div style="font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:9px;">Restarts per variant</div>
+              <div style="display:flex;align-items:center;gap:8px;font-size:13px;">
+                <input type="number" id="n-restarts" value="${oc.n_restarts ?? 1}" min="1" max="20"
+                       style="width:56px;padding:5px 7px;background:var(--surface);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:13px;text-align:right;"
+                       title="Random re-initialisations per candidate — more restarts reduce local-minimum risk at the cost of fitting time">
+                <span style="color:var(--text-muted);font-size:12px;">1 = single fit &nbsp;·&nbsp; 5–10 recommended</span>
+              </div>
+            </div>
+
+            <div>
+              <div style="font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:9px;">Pair element type</div>
+              <div style="display:flex;flex-direction:column;gap:7px;">
+                <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                  <input type="checkbox" class="pair-type-check" value="CPE" ${hasCPE ? 'checked' : ''} style="accent-color:var(--accent);width:15px;height:15px;">
+                  CPE <span style="color:var(--text-muted);font-size:12px;">(constant phase element)</span>
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                  <input type="checkbox" class="pair-type-check" value="C" ${hasC ? 'checked' : ''} style="accent-color:var(--accent);width:15px;height:15px;">
+                  C <span style="color:var(--text-muted);font-size:12px;">(ideal capacitor)</span>
+                </label>
+              </div>
+            </div>
+
+            <div>
+              <div style="font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:9px;">Selection criterion</div>
+              <div style="display:flex;flex-direction:column;gap:7px;">
+                <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer;">
+                  <input type="radio" name="criterion" value="AIC" ${isAIC ? 'checked' : ''} style="accent-color:var(--accent);margin-top:2px;">
+                  <span>AIC<br><span style="color:var(--text-muted);font-size:12px;font-weight:400;">Rewards fit improvement freely — picks more RC pairs if they help at all. Use when you want the best-fitting circuit.</span></span>
+                </label>
+                <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer;">
+                  <input type="radio" name="criterion" value="BIC" ${!isAIC ? 'checked' : ''} style="accent-color:var(--accent);margin-top:2px;">
+                  <span>BIC<br><span style="color:var(--text-muted);font-size:12px;font-weight:400;">Penalises extra parameters more heavily — an extra RC pair must earn its place with a meaningful fit improvement. Use when overfitting is a concern.</span></span>
+                </label>
+              </div>
+            </div>
+
+          </div>
+
+          <div style="margin-top:14px;font-size:12px;color:var(--text-muted);">
+            Components maintained across all variants:
+            <code style="color:var(--accent);margin-left:6px;" id="frame-preview">${stripRcPairsFn(state.circuitString || '')}</code>
+          </div>
+
+          <div style="margin-top:20px;padding:14px 16px;border-radius:6px;border:1px solid var(--border);font-size:12px;line-height:1.7;color:var(--text-muted);">
+            <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px;letter-spacing:.02em;">How auto-optimize works</div>
+            <ol style="margin:0;padding-left:18px;display:flex;flex-direction:column;gap:5px;">
+              <li>Your circuit's existing RC pairs (<code>p(R,CPE)</code> / <code>p(R,C)</code>) are stripped, leaving the frame — the series elements like <code>R0</code>, <code>W0</code>.</li>
+              <li>For every combination of RC count (min → max) and pair type (CPE / C), a candidate circuit is generated by inserting that many pairs into the frame and fitted independently.</li>
+              <li>Each fitted candidate is scored by <strong style="color:var(--text);">AIC or BIC</strong> — both balance fit quality against the number of free parameters, so adding an extra RC pair only wins if it meaningfully improves the fit.</li>
+              <li>The candidate with the lowest score is selected as the result for that file. The <strong style="color:var(--text);">Variants</strong> tab in each result shows the full ranking.</li>
+            </ol>
+            <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
+              Initial guesses and bounds from the Bounds Editor are reused for matching parameter names. New parameters introduced by added RC pairs fall back to physical defaults.
             </div>
           </div>
         </div>
@@ -627,12 +742,50 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
         if (e.key === 'Enter') container.querySelector('#apply-str-btn').click();
       });
 
+      // Mode toggle buttons
+      let currentMode = fitModeVal;
+
+      function setMode(mode) {
+        currentMode = mode;
+        const fixedActive = mode === 'fixed';
+        container.querySelector('#mode-fixed-btn').style.cssText    = modeTabStyle(fixedActive)  + 'border-radius:6px 0 0 6px;';
+        container.querySelector('#mode-optimize-btn').style.cssText = modeTabStyle(!fixedActive) + 'border-radius:0 6px 6px 0;border-left:none;';
+        container.querySelector('#section-fixed').style.display    = fixedActive ? 'block' : 'none';
+        container.querySelector('#section-optimize').style.display = fixedActive ? 'none'  : 'block';
+        if (fixedActive) {
+          renderCircuit();
+        } else {
+          // Refresh frame preview with the current (stripped) circuit string.
+          const preview = container.querySelector('#frame-preview');
+          if (preview) preview.textContent = stripRcPairsFn(treeToString(nodes));
+        }
+      }
+
+      container.querySelector('#mode-fixed-btn').addEventListener('click',    () => setMode('fixed'));
+      container.querySelector('#mode-optimize-btn').addEventListener('click', () => setMode('optimize'));
+
       container.querySelector('#back-btn').addEventListener('click', () => navigate(3));
       container.querySelector('#next-btn').addEventListener('click', () => {
-        const str = treeToString(nodes);
-        if (!str) { showToast('Build a circuit first.', 'error'); return; }
-        setState({ circuitTree: { nodes }, circuitString: str, maxStep: Math.max(getState().maxStep, 5) });
-        navigate(5);
+        if (currentMode === 'optimize') {
+          const pairTypes = [...container.querySelectorAll('.pair-type-check:checked')].map(el => el.value);
+          const optimizeConfig = {
+            enabled: true,
+            rc_min:     Math.max(0, parseInt(container.querySelector('#rc-min')?.value) || 1),
+            rc_max:     Math.max(1, parseInt(container.querySelector('#rc-max')?.value) || 5),
+            pair_types: pairTypes.length ? pairTypes : ['CPE'],
+            criterion:  container.querySelector('input[name="criterion"]:checked')?.value || 'AIC',
+            n_restarts: Math.max(1, parseInt(container.querySelector('#n-restarts')?.value) || 1),
+          };
+          // Persist circuit string (frame) from whatever was last built, even if empty.
+          const str = treeToString(nodes);
+          setState({ circuitTree: { nodes }, circuitString: str, maxStep: Math.max(getState().maxStep, 5), optimizeConfig });
+          navigate(5);
+        } else {
+          const str = treeToString(nodes);
+          if (!str) { showToast('Build a circuit first.', 'error'); return; }
+          setState({ circuitTree: { nodes }, circuitString: str, maxStep: Math.max(getState().maxStep, 5), optimizeConfig: { enabled: false } });
+          navigate(5);
+        }
       });
 
       renderCircuit();
