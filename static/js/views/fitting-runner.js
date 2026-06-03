@@ -33,10 +33,13 @@ function paramUnitInfo(name) {
 
 function configKey(state) {
   return JSON.stringify({
-    files:   (state.files || []).map(f => f.path),
-    col:     state.columnMap,
-    circuit: state.circuitConfig,
-    timeout: state.fitTimeout ?? 60,
+    files:    (state.files || []).map(f => f.path),
+    col:      state.columnMap,
+    circuit:  state.circuitConfig,
+    timeout:  state.fitTimeout ?? 60,
+    optimize: state.optimizeConfig ?? { enabled: false },
+    freqMin:  state.fitFreqMin ?? null,
+    freqMax:  state.fitFreqMax ?? null,
   });
 }
 
@@ -87,7 +90,14 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     container.innerHTML = `
       <div class="section-header">Fit</div>
       <div class="section-sub">
-        Circuit: <code style="color:var(--accent)">${state.circuitString || '—'}</code>
+        ${(() => {
+          const oc = state.optimizeConfig ?? {};
+          if (oc.enabled) {
+            const types = (oc.pair_types || ['CPE']).join('/');
+            return `Optimize: searching ${oc.rc_min}–${oc.rc_max} RC pairs (${types}), ${oc.criterion ?? 'AIC'}`;
+          }
+          return `Circuit: <code style="color:var(--accent)">${state.circuitString || '—'}</code>`;
+        })()}
         &nbsp;·&nbsp; ${files.length} file(s)
       </div>
 
@@ -112,6 +122,17 @@ export function FittingRunnerView(container, { navigate, showToast }) {
                  value="${state.fitTimeout ?? 60}"
                  style="width:64px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;text-align:right;">
           s / fit
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
+          Freq
+          <input id="freq-min" type="number" min="0" step="any"
+                 value="${state.fitFreqMin ?? ''}" placeholder="min"
+                 style="width:72px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;text-align:right;">
+          –
+          <input id="freq-max" type="number" min="0" step="any"
+                 value="${state.fitFreqMax ?? ''}" placeholder="max"
+                 style="width:72px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;text-align:right;">
+          Hz
         </label>
         <button class="btn btn-danger" id="stop-btn" style="display:none;">■ Stop</button>
         <button class="btn btn-primary" id="run-btn" ${!ready ? 'disabled' : ''}>${cached ? '↺ Re-run Fitting' : '▶ Run Fitting'}</button>
@@ -229,8 +250,9 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     const charStr = Object.entries(result.characterization || {})
       .map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toPrecision(4) : v}`)
       .join(' · ');
-    metaEl.textContent = charStr;
-    if (result.error) metaEl.textContent += (charStr ? ' · ' : '') + result.error;
+    const circuitStr = result.circuit_used ? `Circuit: ${result.circuit_used}` : '';
+    metaEl.textContent = [charStr, circuitStr].filter(s => s).join(' · ');
+    if (result.error) metaEl.textContent += (metaEl.textContent ? ' · ' : '') + result.error;
 
     paramsEl.innerHTML = Object.entries(result.parameters || {})
       .map(([k, v]) => {
@@ -246,6 +268,17 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     const tabsEl = container.querySelector('#fit-modal-tabs');
     const freshTabs = tabsEl.cloneNode(true);
     tabsEl.replaceWith(freshTabs);
+
+    // Add or remove the Variants tab depending on whether there are variants to show.
+    freshTabs.querySelector('[data-tab="variants"]')?.remove();
+    if (result.variants_tried?.length > 1) {
+      const vBtn = document.createElement('button');
+      vBtn.className = 'tab-btn';
+      vBtn.dataset.tab = 'variants';
+      vBtn.textContent = `Variants (${result.variants_tried.length})`;
+      freshTabs.appendChild(vBtn);
+    }
+
     freshTabs.querySelectorAll('.tab-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.tab === 'nyquist');
       btn.addEventListener('click', () => {
@@ -253,9 +286,10 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         btn.classList.add('active');
         plotEl.innerHTML = '';
         requestAnimationFrame(() => {
-          if (btn.dataset.tab === 'nyquist')   plotNyquist(result, plotEl);
-          else if (btn.dataset.tab === 'bode') plotBode(result, plotEl);
-          else                                 plotResiduals(result, plotEl);
+          if (btn.dataset.tab === 'nyquist')        plotNyquist(result, plotEl);
+          else if (btn.dataset.tab === 'bode')      plotBode(result, plotEl);
+          else if (btn.dataset.tab === 'variants')  plotVariants(result, plotEl);
+          else                                      plotResiduals(result, plotEl);
         });
       });
     });
@@ -306,16 +340,26 @@ export function FittingRunnerView(container, { navigate, showToast }) {
 
     const results = [];
     let stopped = false;
+    let gotDone = false;
+
+    const timeout  = parseFloat(container.querySelector('#fit-timeout').value) || 60;
+    const freqMinVal = container.querySelector('#freq-min').value.trim();
+    const freqMaxVal = container.querySelector('#freq-max').value.trim();
+    const freqMin  = freqMinVal !== '' ? parseFloat(freqMinVal) : null;
+    const freqMax  = freqMaxVal !== '' ? parseFloat(freqMaxVal) : null;
+    const runCacheKey = configKey({ ...state, fitTimeout: timeout, fitFreqMin: freqMin, fitFreqMax: freqMax });
 
     try {
-      const timeout = parseFloat(container.querySelector('#fit-timeout').value) || 60;
-      setState({ fitTimeout: timeout });
+      setState({ fitTimeout: timeout, fitFreqMin: freqMin, fitFreqMax: freqMax });
 
       const request = {
-        files:          state.files,
-        column_map:     state.columnMap,
-        circuit_config: state.circuitConfig,
-        fit_timeout:    timeout,
+        files:           state.files,
+        column_map:      { ...state.columnMap, decimal_places: state.charDecimalPlaces ?? {} },
+        circuit_config:  state.circuitConfig,
+        fit_timeout:     timeout,
+        optimize_config: state.optimizeConfig ?? { enabled: false },
+        freq_min:        freqMin,
+        freq_max:        freqMax,
       };
 
       for await (const event of streamFitting(request, _abortCtrl.signal)) {
@@ -335,6 +379,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
           // be handled entirely in microtasks with no repaint opportunity between them.
           await new Promise(r => requestAnimationFrame(r));
         } else if (event.event === 'done') {
+          gotDone = true;
           progressBar.style.width = '100%';
           const ok = results.filter(r => r.success).length;
           progressLabel.textContent = `Done — ${ok}/${results.length} successful`;
@@ -352,12 +397,15 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       runBtn.disabled  = false;
       stopBtn.style.display = 'none';
       nextBtn.disabled = !results.length;
-      const completed = !stopped && results.length === state.files.length;
+      const completed = !stopped && gotDone;
       setState({
         fitResults:  results,
-        fitCacheKey: completed ? configKey(getState()) : null,
+        fitCacheKey: completed ? runCacheKey : null,
         maxStep:     Math.max(state.maxStep, 7),
       });
+
+      // Refresh banners/buttons to reflect the latest cache state.
+      render();
     }
   }
 
@@ -422,6 +470,81 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     }, { displayModeBar: false, responsive: true });
   }
 
+  function plotVariants(result, el) {
+    const variants = result.variants_tried || [];
+    if (!variants.length) {
+      el.innerHTML = '<p style="color:var(--text-muted);padding:16px 0;">No variant data available.</p>';
+      return;
+    }
+
+    const oc = getState().optimizeConfig ?? {};
+    const criterion = (oc.criterion ?? 'AIC').toLowerCase();
+
+    const successVariants = variants.filter(v => v.success && v[criterion] != null);
+    const bestScore = successVariants.length ? Math.min(...successVariants.map(v => v[criterion])) : null;
+
+    const infoId = 'variants-info-popup';
+    el.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;position:relative;">
+        <span style="font-size:12px;color:var(--text-muted);">Winner = 0. All others show how much worse (ΔAIC / ΔBIC). ★ marks the selected circuit.</span>
+        <button id="variants-info-btn" style="background:none;border:1px solid var(--border);border-radius:50%;width:18px;height:18px;font-size:11px;color:var(--text-muted);cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;">ⓘ</button>
+        <div id="${infoId}" style="display:none;position:absolute;left:0;top:24px;z-index:10;width:340px;padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12px;line-height:1.6;color:var(--text);box-shadow:0 4px 16px rgba(0,0,0,.3);">
+          <div style="font-weight:600;margin-bottom:6px;">How to read ΔAIC / ΔBIC</div>
+          <p style="margin:0 0 6px;">The winning circuit is always <strong>0</strong>. Every other circuit shows how much worse it is relative to the winner — so +4 means "4 points worse than the best."</p>
+          <p style="margin:0 0 6px;"><strong>AIC</strong> (Akaike) and <strong>BIC</strong> (Bayesian) both reward a better fit but penalise circuits with more free parameters, so a 3-RC circuit doesn't automatically win just because it fits slightly better.</p>
+          <p style="margin:0;"><strong>BIC</strong> penalises extra parameters more heavily, so it tends to select simpler circuits. A common rule of thumb: ΔAIC &lt; 2 means the two circuits are essentially equivalent; ΔAIC &gt; 10 means the winner is strongly preferred.</p>
+        </div>
+      </div>
+      <div style="overflow-x:auto;overflow-y:auto;max-height:260px;">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr style="position:sticky;top:0;background:var(--surface);">
+              <th style="text-align:left;padding:5px 10px;border-bottom:1px solid var(--border);color:var(--text-muted);font-weight:600;">Circuit</th>
+              <th style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--border);color:var(--text-muted);font-weight:600;">k</th>
+              <th style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--border);color:var(--text-muted);font-weight:600;">MAPE</th>
+              <th style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--border);color:var(--text-muted);font-weight:600;">ΔAIC</th>
+              <th style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--border);color:var(--text-muted);font-weight:600;">ΔBIC</th>
+              <th style="padding:5px 8px;border-bottom:1px solid var(--border);"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(() => {
+              const bestAic = Math.min(...variants.filter(v => v.success && v.aic != null).map(v => v.aic));
+              const bestBic = Math.min(...variants.filter(v => v.success && v.bic != null).map(v => v.bic));
+              return variants.map(v => {
+                const isWinner = v.success && bestScore != null && v[criterion] === bestScore;
+                const bg      = isWinner ? 'background:rgba(100,220,150,0.07);' : '';
+                const opacity = v.success ? '' : 'opacity:0.45;';
+                const resText = v.residual != null ? `${(v.residual * 100).toFixed(2)}%` : (v.error ?? '—');
+                const dAic = v.aic != null && isFinite(bestAic) ? `+${(v.aic - bestAic).toFixed(1)}` : '—';
+                const dBic = v.bic != null && isFinite(bestBic) ? `+${(v.bic - bestBic).toFixed(1)}` : '—';
+                return `<tr style="${bg}${opacity}">
+                  <td style="padding:4px 10px;font-family:monospace;font-size:11px;color:var(--accent);">${v.circuit_string}</td>
+                  <td style="text-align:right;padding:4px 8px;">${v.n_params}</td>
+                  <td style="text-align:right;padding:4px 8px;">${resText}</td>
+                  <td style="text-align:right;padding:4px 8px;">${isWinner ? '0' : dAic}</td>
+                  <td style="text-align:right;padding:4px 8px;">${isWinner ? '0' : dBic}</td>
+                  <td style="text-align:center;padding:4px 8px;color:#64dc96;font-size:14px;">${isWinner ? '★' : ''}</td>
+                </tr>`;
+              }).join('');
+            })()}
+          </tbody>
+        </table>
+      </div>`;
+
+    // Info button toggle
+    const infoBtn = el.querySelector('#variants-info-btn');
+    const infoPopup = el.querySelector(`#${infoId}`);
+    infoBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      infoPopup.style.display = infoPopup.style.display === 'none' ? 'block' : 'none';
+    });
+    document.addEventListener('click', function closeInfo() {
+      infoPopup.style.display = 'none';
+      document.removeEventListener('click', closeInfo);
+    }, { once: true });
+  }
+
   function plotNyquist(result, el) {
     if (!el || typeof Plotly === 'undefined') return;
 
@@ -456,9 +579,28 @@ export function FittingRunnerView(container, { navigate, showToast }) {
   }
 
   return {
-    onEnter() {
+    async onEnter() {
       render();
       document.addEventListener('keydown', onKeyDown);
+
+      // Auto-populate freq range inputs from the first file when no range is saved in state.
+      const s = getState();
+      if (s.fitFreqMin === null && s.fitFreqMax === null && s.files?.length && s.columnMap?.frequency) {
+        try {
+          const res = await fetch('/api/freq-range', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: s.files[0].path, frequency_column: s.columnMap.frequency }),
+          });
+          if (res.ok) {
+            const { freq_min, freq_max } = await res.json();
+            const minEl = container.querySelector('#freq-min');
+            const maxEl = container.querySelector('#freq-max');
+            if (minEl) minEl.value = freq_min;
+            if (maxEl) maxEl.value = freq_max;
+          }
+        } catch (_) {}
+      }
     },
     onLeave() {
       document.removeEventListener('keydown', onKeyDown);
