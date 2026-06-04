@@ -77,8 +77,13 @@ def _build_param_lookup(
 def _resolve_bounds(
     param_names: List[str],
     name_lookup: Dict[str, tuple[float, float, float]],
+    rs_estimate: float | None = None,
 ) -> tuple[List[float], List[float], List[float]]:
-    """Resolve initial/lower/upper for each param: user lookup first, then type defaults."""
+    """Resolve initial/lower/upper for each param: user lookup first, then type defaults.
+
+    If rs_estimate is given, it overrides the initial guess for R0 (the series
+    resistance) so each spectrum's fit starts from the HF real-axis intercept.
+    """
     initials, lowers, uppers = [], [], []
     for name in param_names:
         if name in name_lookup:
@@ -86,6 +91,9 @@ def _resolve_bounds(
         else:
             key = _param_type_key(name)
             i, l, u = _PARAM_DEFAULTS.get(key, (1.0, 0.0, float('inf')))
+        # Use KK-derived HF intercept as initial guess for R0 (series resistance)
+        if rs_estimate is not None and rs_estimate > 0 and name == 'R0':
+            i = float(np.clip(rs_estimate, l, u if np.isfinite(u) else rs_estimate * 100))
         initials.append(i)
         lowers.append(l)
         uppers.append(u)
@@ -336,6 +344,7 @@ def fit_single(
     column_map: ColumnMap | None = None,
     weight_by_modulus: bool = True,
     solver: str = 'lm',
+    rs_estimate: float | None = None,
 ) -> FitResult:
     allowed_char = (set(column_map.characterization.keys()) if column_map else set()) | {'identifier', 'battery_id'}
     clean_char = {k: v for k, v in char_values.items() if k in allowed_char}
@@ -364,7 +373,7 @@ def fit_single(
     for variant_circuit, _ in candidates:
         try:
             param_names, _ = get_param_names(variant_circuit)
-            initials, lowers, uppers = _resolve_bounds(param_names, name_lookup)
+            initials, lowers, uppers = _resolve_bounds(param_names, name_lookup, rs_estimate)
             k = len(param_names)
 
             best_obj = float('inf')
@@ -487,17 +496,20 @@ async def fit_batch_stream(request: FitRequest) -> AsyncGenerator[str, None]:
                 load_eis_data, file_info.path, request.column_map
             )
 
-            # Apply frequency range filter if requested
+            # Per-file freq range (from KK suggestion) takes priority over global range
+            f_min = file_info.freq_min if file_info.freq_min is not None else request.freq_min
+            f_max = file_info.freq_max if file_info.freq_max is not None else request.freq_max
+
             mask = np.ones(len(frequencies), dtype=bool)
-            if request.freq_min is not None:
-                mask &= frequencies >= request.freq_min
-            if request.freq_max is not None:
-                mask &= frequencies <= request.freq_max
+            if f_min is not None:
+                mask &= frequencies >= f_min
+            if f_max is not None:
+                mask &= frequencies <= f_max
             if not mask.all():
                 if not mask.any():
                     raise ValueError(
                         f"No data points remain after applying frequency range "
-                        f"{request.freq_min}–{request.freq_max} Hz"
+                        f"{f_min}–{f_max} Hz"
                     )
                 frequencies = frequencies[mask]
                 Z = Z[mask]
@@ -514,6 +526,7 @@ async def fit_batch_stream(request: FitRequest) -> AsyncGenerator[str, None]:
                     request.column_map,
                     request.weight_by_modulus,
                     request.solver,
+                    file_info.rs_estimate,
                 ),
                 timeout=request.fit_timeout,
             )

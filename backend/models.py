@@ -12,6 +12,9 @@ class FileInfo(BaseModel):
     path: str
     columns: List[str]
     row_count: int
+    freq_min: Optional[float] = None      # per-file freq filter (from KK suggestion)
+    freq_max: Optional[float] = None
+    rs_estimate: Optional[float] = None   # HF real-axis intercept for R_s initialisation
 
 
 class ScanFolderResponse(BaseModel):
@@ -148,3 +151,4 @@ class KKResult(BaseModel):
     flagged_indices: List[int] = []  # indices where residual > threshold
     freq_min_suggest: Optional[float] = None  # suggested lower freq cutoff (Hz)
     freq_max_suggest: Optional[float] = None  # suggested upper freq cutoff (Hz)
+    rs_estimate: Optional[float] = None       # Z' at highest frequency → R_s estimate (Ω)

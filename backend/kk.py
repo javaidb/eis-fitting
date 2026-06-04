@@ -44,6 +44,10 @@ def run_kk_single(
         freq_min_s = float(valid_freqs.min())
         freq_max_s = float(valid_freqs.max())
 
+    # HF intercept: Z' at the highest measured frequency ≈ R_s
+    hf_idx = int(np.argmax(frequencies))
+    rs_est = float(Z.real[hf_idx])
+
     return KKResult(
         success=True,
         M=int(M),
@@ -57,6 +61,7 @@ def run_kk_single(
         flagged_indices=flagged,
         freq_min_suggest=freq_min_s,
         freq_max_suggest=freq_max_s,
+        rs_estimate=rs_est,
     )
 
 

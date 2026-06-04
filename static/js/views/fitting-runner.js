@@ -77,6 +77,10 @@ export function FittingRunnerView(container, { navigate, showToast }) {
   const charMap   = new Map();   // path → characterization
   const kkMap     = new Map();   // path → KKResult
 
+  // 'kk' when KK was the last operation run; 'fit' when fitting was last.
+  // Controls which state buildTile renders when both maps have data.
+  let _activeView = 'fit';
+
   let binByField = '';
   let sortByBest = false;
 
@@ -294,42 +298,63 @@ export function FittingRunnerView(container, { navigate, showToast }) {
   }
 
   function buildTile(filename, path) {
-    const safeId  = pathToSafeId(path);
+    const safeId    = pathToSafeId(path);
     const fitResult = resultMap.get(path);
     const kkResult  = kkMap.get(path);
 
+    // KK view takes priority when KK was the most recently run operation
+    if (_activeView === 'kk' && kkResult) {
+      return _kkTileHTML(filename, path, safeId, kkResult);
+    }
     if (fitResult) {
-      const good = fitResult.success && fitResult.residual != null && fitResult.residual < GOOD_THRESHOLD;
-      const cls  = fitResult.success ? (good ? 'good' : 'poor') : 'failed';
-      const pct  = fitResult.residual != null ? `${(fitResult.residual * 100).toFixed(1)}%` : '—';
-      return `<div class="fit-tile ${cls}" data-path="${path}" id="tile-${safeId}">
-        <div class="fit-tile-name">${filename}</div>
-        <div class="fit-tile-pct">${fitResult.success ? pct : 'FAILED'}</div>
-      </div>`;
+      return _fitTileHTML(filename, path, safeId, fitResult);
     }
-
+    // KK as fallback when no fit result yet
     if (kkResult) {
-      const { cls, label } = kkTileState(kkResult);
-      return `<div class="fit-tile ${cls}" data-path="${path}" id="tile-${safeId}">
-        <div class="fit-tile-name">${filename}</div>
-        <div class="fit-tile-pct">${label}</div>
-      </div>`;
+      return _kkTileHTML(filename, path, safeId, kkResult);
     }
-
     return `<div class="fit-tile pending" data-path="${path}" id="tile-${safeId}">
       <div class="fit-tile-name">${filename}</div>
       <div class="fit-tile-pct">—</div>
     </div>`;
   }
 
+  function _fitTileHTML(filename, path, safeId, result) {
+    const good = result.success && result.residual != null && result.residual < GOOD_THRESHOLD;
+    const cls  = result.success ? (good ? 'good' : 'poor') : 'failed';
+    const pct  = result.residual != null ? `${(result.residual * 100).toFixed(1)}%` : '—';
+    return `<div class="fit-tile ${cls}" data-path="${path}" id="tile-${safeId}">
+      <div class="fit-tile-name">${filename}</div>
+      <div class="fit-tile-pct">${result.success ? pct : 'FAILED'}</div>
+    </div>`;
+  }
+
+  function _kkTileHTML(filename, path, safeId, kk) {
+    const { cls, label } = kkTileState(kk);
+    const rs = kk.rs_estimate;
+    const rsSub = rs != null ? `<div class="fit-tile-sub">Rs≈${(rs * 1000).toFixed(1)} mΩ</div>` : '';
+    return `<div class="fit-tile ${cls}" data-path="${path}" id="tile-${safeId}">
+      <div class="fit-tile-name">${filename}</div>
+      <div class="fit-tile-pct">${label}</div>
+      ${rsSub}
+    </div>`;
+  }
+
   function wireTileClicks() {
     container.querySelectorAll('.fit-tile:not(.pending)').forEach(el => {
       el.addEventListener('click', () => {
-        const path      = el.dataset.path;
-        const fitResult = resultMap.get(path);
-        const kkResult  = kkMap.get(path);
-        if      (fitResult) openFitModal(fitResult);
-        else if (kkResult)  openKKModal(kkResult);
+        const path = el.dataset.path;
+        // Route based on what the tile is visually showing, not just map presence
+        const isKKTile = el.classList.contains('kk-ok') ||
+                         el.classList.contains('kk-warn') ||
+                         el.classList.contains('kk-fail');
+        if (isKKTile) {
+          const kkResult = kkMap.get(path);
+          if (kkResult) openKKModal(kkResult);
+        } else {
+          const fitResult = resultMap.get(path);
+          if (fitResult) openFitModal(fitResult);
+        }
       });
     });
   }
@@ -337,29 +362,30 @@ export function FittingRunnerView(container, { navigate, showToast }) {
   // Live update helpers called during streaming
 
   function updateFitTile(fitResult, path) {
-    const el = container.querySelector(`#tile-${pathToSafeId(path)}`);
+    const safeId = pathToSafeId(path);
+    const el = container.querySelector(`#tile-${safeId}`);
     if (!el) return;
-    const good = fitResult.success && fitResult.residual != null && fitResult.residual < GOOD_THRESHOLD;
-    const cls  = fitResult.success ? (good ? 'good' : 'poor') : 'failed';
-    const pct  = fitResult.residual != null ? `${(fitResult.residual * 100).toFixed(1)}%` : '—';
-    el.className = `fit-tile ${cls}`;
-    el.querySelector('.fit-tile-pct').textContent = fitResult.success ? pct : 'FAILED';
-    const fresh = el.cloneNode(true);
-    fresh.addEventListener('click', () => openFitModal(fitResult));
-    el.replaceWith(fresh);
+    // Replace entire inner HTML so any KK sub-line is also removed
+    el.outerHTML = _fitTileHTML(
+      el.querySelector('.fit-tile-name')?.textContent ?? '',
+      path, safeId, fitResult,
+    );
+    // Re-query since outerHTML replaced the element
+    const fresh = container.querySelector(`#tile-${safeId}`);
+    if (fresh) fresh.addEventListener('click', () => openFitModal(fitResult));
   }
 
   function updateKKTile(kkResult, path) {
-    // Don't overwrite a tile that already has a fit result
-    if (resultMap.has(path)) return;
-    const el = container.querySelector(`#tile-${pathToSafeId(path)}`);
+    // KK always overrides — this is the point: re-running KK after fitting shows KK state
+    const safeId = pathToSafeId(path);
+    const el = container.querySelector(`#tile-${safeId}`);
     if (!el) return;
-    const { cls, label } = kkTileState(kkResult);
-    el.className = `fit-tile ${cls}`;
-    el.querySelector('.fit-tile-pct').textContent = label;
-    const fresh = el.cloneNode(true);
-    fresh.addEventListener('click', () => openKKModal(kkResult));
-    el.replaceWith(fresh);
+    el.outerHTML = _kkTileHTML(
+      el.querySelector('.fit-tile-name')?.textContent ?? '',
+      path, safeId, kkResult,
+    );
+    const fresh = container.querySelector(`#tile-${safeId}`);
+    if (fresh) fresh.addEventListener('click', () => openKKModal(kkResult));
   }
 
   // ── KK modal ───────────────────────────────────────────────────────────────
@@ -385,6 +411,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     const metaParts = [];
     if (kk.M  != null) metaParts.push(`M = ${kk.M} RC elements`);
     if (kk.mu != null) metaParts.push(`μ = ${kk.mu.toFixed(3)}`);
+    if (kk.rs_estimate != null) metaParts.push(`Rs ≈ ${(kk.rs_estimate * 1000).toFixed(2)} mΩ`);
     if (kk.error)      metaParts.push(kk.error);
     metaEl.textContent = metaParts.join(' · ');
 
@@ -415,26 +442,25 @@ export function FittingRunnerView(container, { navigate, showToast }) {
 
     // Bottom action: apply suggested range
     paramsEl.innerHTML = '';
-    if (kk.freq_min_suggest != null) {
+    const hints = [];
+    if (kk.freq_min_suggest != null)
+      hints.push(`Freq: ${kk.freq_min_suggest.toPrecision(3)} – ${kk.freq_max_suggest.toPrecision(3)} Hz`);
+    if (kk.rs_estimate != null)
+      hints.push(`Rs ≈ ${(kk.rs_estimate * 1000).toFixed(2)} mΩ will seed R0 initial guess`);
+
+    if (hints.length) {
       paramsEl.innerHTML = `
         <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-          <span style="font-size:12px;color:var(--text-muted);">
-            Suggested compliant range:
-            <strong style="color:var(--text);">
-              ${kk.freq_min_suggest.toPrecision(3)} – ${kk.freq_max_suggest.toPrecision(3)} Hz
-            </strong>
-          </span>
-          <button class="btn btn-secondary" id="modal-kk-apply" style="font-size:12px;padding:4px 12px;">
-            Apply to freq filter
-          </button>
+          <span style="font-size:12px;color:var(--text-muted);">${hints.join(' · ')}</span>
+          ${kk.freq_min_suggest != null ? `<button class="btn btn-secondary" id="modal-kk-apply" style="font-size:12px;padding:4px 12px;">Apply freq range globally</button>` : ''}
         </div>`;
-      container.querySelector('#modal-kk-apply').addEventListener('click', () => {
+      container.querySelector('#modal-kk-apply')?.addEventListener('click', () => {
         const minEl = container.querySelector('#freq-min');
         const maxEl = container.querySelector('#freq-max');
         if (minEl) minEl.value = kk.freq_min_suggest;
         if (maxEl) maxEl.value = kk.freq_max_suggest;
         closeModal();
-        showToast('Frequency range applied — re-run fitting to use it.', 'success');
+        showToast('Global freq range updated — per-file ranges from KK are still used automatically.', 'success');
       });
     }
 
@@ -619,9 +645,9 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     kkBtn.disabled = true;
     kkBtn.textContent = 'KK…';
 
+    _activeView = 'kk';
     kkMap.clear();
-    // Reset all tiles without fit results back to pending so KK state starts fresh
-    rebuildGrid();
+    rebuildGrid();   // tiles go to pending (or fit state if _activeView were 'fit')
     wireTileClicks();
 
     const freqMinVal = container.querySelector('#freq-min').value.trim();
@@ -638,9 +664,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
 
     try {
       for await (const event of streamKK(request)) {
-        if (event.event === 'progress') {
-          // Could update a status label here if needed
-        } else if (event.event === 'result') {
+        if (event.event === 'result') {
           const r = event.data;
           const path = filePaths[kkResults.length];
           kkResults.push(r);
@@ -660,6 +684,21 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     } catch (err) {
       showToast(`KK error: ${err.message}`, 'error');
     }
+
+    // Persist per-file KK data so fitting can use it even after a page re-render
+    const kkData = {};
+    for (const r of kkResults) {
+      if (r.path) {
+        kkData[r.path] = {
+          freqMin:  r.freq_min_suggest ?? null,
+          freqMax:  r.freq_max_suggest ?? null,
+          rsEst:    r.rs_estimate      ?? null,
+          M:        r.M                ?? null,
+          mu:       r.mu               ?? null,
+        };
+      }
+    }
+    setState({ kkData });
 
     kkBtn.disabled = false;
     kkBtn.textContent = 'KK Check';
@@ -710,13 +749,26 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       setState({ fitTimeout: timeout, fitFreqMin: freqMin, fitFreqMax: freqMax,
                  fitWeightByModulus: weightByModulus, fitSolver: solver });
 
+      // Attach per-file KK-derived freq range and Rs estimate to each FileInfo.
+      // Per-file values take priority in the backend; global inputs are the fallback.
+      const kkData = getState().kkData ?? {};
+      const filesWithKK = state.files.map(f => {
+        const kk = kkData[f.path];
+        return {
+          ...f,
+          freq_min:    kk?.freqMin  ?? freqMin,
+          freq_max:    kk?.freqMax  ?? freqMax,
+          rs_estimate: kk?.rsEst    ?? null,
+        };
+      });
+
       const request = {
-        files:             state.files,
+        files:             filesWithKK,
         column_map:        { ...state.columnMap, decimal_places: state.charDecimalPlaces ?? {} },
         circuit_config:    state.circuitConfig,
         fit_timeout:       timeout,
         optimize_config:   state.optimizeConfig ?? { enabled: false },
-        freq_min:          freqMin,
+        freq_min:          freqMin,   // global fallback (backend only uses if per-file is null)
         freq_max:          freqMax,
         weight_by_modulus: weightByModulus,
         solver:            solver,
@@ -753,6 +805,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       runBtn.disabled  = false;
       stopBtn.style.display = 'none';
       nextBtn.disabled = !results.length;
+      _activeView = 'fit';   // tiles now show fit state when grid is rebuilt
       setState({
         fitResults:  results,
         fitCacheKey: (!stopped && gotDone) ? runCacheKey : null,

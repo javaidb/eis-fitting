@@ -25,6 +25,7 @@ const _defaults = {
   fitFreqMax: null,
   fitWeightByModulus: true,
   fitSolver: 'lm',
+  kkData: {},   // path → { freqMin, freqMax, rsEst, M, mu } from last KK run
   fitting: false,
   _sv: 2,           // schema version — bump when step numbering changes
 };

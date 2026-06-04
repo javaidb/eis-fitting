@@ -633,6 +633,15 @@ select option { background: var(--surface2); }
   font-weight: 700;
   color: var(--text);
 }
+.fit-tile-sub {
+  font-size: 9px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+  opacity: 0.8;
+}
 .fit-tile.good  .fit-tile-pct { color: var(--success); }
 .fit-tile.poor  .fit-tile-pct { color: var(--danger); }
 .fit-tile.failed .fit-tile-pct { color: var(--danger); }
