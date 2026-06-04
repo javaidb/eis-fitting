@@ -6,7 +6,7 @@ from typing import AsyncGenerator, Dict, List, Optional, Union
 
 import numpy as np
 from numpy.random import default_rng
-from scipy.optimize import curve_fit, differential_evolution as _diff_ev
+from scipy.optimize import curve_fit, differential_evolution as _diff_ev, basinhopping, minimize
 from impedance.models.circuits import CustomCircuit
 
 from .file_handler import load_eis_data
@@ -309,6 +309,115 @@ def _do_diff_ev_fit(
     return popt, pcov, c.predict(frequencies)
 
 
+def _do_basin_hopping_fit(
+    circuit_string: str,
+    initials: List[float],
+    lowers: List[float],
+    uppers: List[float],
+    frequencies: np.ndarray,
+    Z: np.ndarray,
+    weighting: str = 'none',
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+    """Fit circuit via basin hopping (global). Returns (popt, pcov, Z_fit).
+
+    Combines random perturbations with L-BFGS-B local steps to escape local
+    minima. pcov estimated via a follow-up TRF fit from the best solution.
+    """
+    model_func, c, _ = _make_model_func(circuit_string, frequencies)
+    sigma = _compute_sigma(Z, weighting)
+
+    def objective(params: np.ndarray) -> float:
+        try:
+            c.parameters_ = params
+            Z_pred = c.predict(frequencies)
+            res_r = Z.real - Z_pred.real
+            res_i = Z.imag - Z_pred.imag
+            if sigma is not None:
+                n = len(Z)
+                return float(np.sum((res_r / sigma[:n]) ** 2 + (res_i / sigma[n:]) ** 2))
+            return float(np.sum(res_r ** 2 + res_i ** 2))
+        except Exception:
+            return 1e30
+
+    # Build finite bounds for the local minimizer step.
+    bounds_bh = []
+    for lo, hi, i0 in zip(lowers, uppers, initials):
+        lo_eff = lo if np.isfinite(lo) else max(abs(i0) * 1e-6, 1e-30)
+        hi_eff = hi if np.isfinite(hi) else max(abs(i0) * 1e4, 1e4)
+        if lo_eff >= hi_eff:
+            hi_eff = lo_eff * 1e4 + 1e-20
+        bounds_bh.append((lo_eff, hi_eff))
+
+    result = basinhopping(
+        objective, initials,
+        minimizer_kwargs={'method': 'L-BFGS-B', 'bounds': bounds_bh},
+        niter=200,
+        seed=42,
+    )
+    popt = result.x
+
+    pcov = None
+    try:
+        _, pcov, _ = _do_lm_fit(circuit_string, popt.tolist(), lowers, uppers,
+                                  frequencies, Z, weighting)
+    except Exception:
+        pass
+
+    c.parameters_ = popt
+    return popt, pcov, c.predict(frequencies)
+
+
+def _do_nelder_mead_fit(
+    circuit_string: str,
+    initials: List[float],
+    lowers: List[float],
+    uppers: List[float],
+    frequencies: np.ndarray,
+    Z: np.ndarray,
+    weighting: str = 'none',
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+    """Fit circuit via Nelder-Mead simplex (local, gradient-free). Returns (popt, pcov, Z_fit).
+
+    Bounds are enforced via a hard penalty. pcov estimated via a follow-up TRF
+    fit from the Nelder-Mead solution.
+    """
+    model_func, c, _ = _make_model_func(circuit_string, frequencies)
+    sigma = _compute_sigma(Z, weighting)
+
+    def objective(params: np.ndarray) -> float:
+        try:
+            for val, lo, hi in zip(params, lowers, uppers):
+                if val < lo or (np.isfinite(hi) and val > hi):
+                    return 1e30
+            c.parameters_ = params
+            Z_pred = c.predict(frequencies)
+            res_r = Z.real - Z_pred.real
+            res_i = Z.imag - Z_pred.imag
+            if sigma is not None:
+                n = len(Z)
+                return float(np.sum((res_r / sigma[:n]) ** 2 + (res_i / sigma[n:]) ** 2))
+            return float(np.sum(res_r ** 2 + res_i ** 2))
+        except Exception:
+            return 1e30
+
+    result = minimize(
+        objective, initials,
+        method='Nelder-Mead',
+        options={'maxiter': 50000, 'xatol': 1e-8, 'fatol': 1e-8},
+    )
+    popt = result.x
+
+    pcov = None
+    try:
+        _, pcov, _ = _do_lm_fit(circuit_string, popt.tolist(), lowers, uppers,
+                                  frequencies, Z, weighting)
+    except Exception:
+        pass
+
+    c.parameters_ = popt
+    return popt, pcov, c.predict(frequencies)
+
+
 # ── post-fit statistics ───────────────────────────────────────────────────────
 
 def _compute_chi_sq_nu(
@@ -407,6 +516,34 @@ def fit_single(
                     frequencies, Z, weighting,
                 )
                 best_popt, best_pcov, Z_fit = popt, pcov, Z_try
+
+            elif solver == 'basin_hop':
+                # Single basin-hopping run (internally explores landscape)
+                popt, pcov, Z_try = _do_basin_hopping_fit(
+                    variant_circuit, initials, lowers, uppers,
+                    frequencies, Z, weighting,
+                )
+                best_popt, best_pcov, Z_fit = popt, pcov, Z_try
+
+            elif solver == 'nelder_mead':
+                # Multi-start Nelder-Mead (local, gradient-free)
+                for restart in range(n_restarts):
+                    guess = initials if restart == 0 else _sample_initial_guess(initials, lowers, uppers, rng)
+                    try:
+                        popt, pcov, Z_try = _do_nelder_mead_fit(
+                            variant_circuit, guess, lowers, uppers,
+                            frequencies, Z, weighting,
+                        )
+                        mod = np.maximum(np.abs(Z), 1e-30)
+                        obj = float(np.sum(((Z.real - Z_try.real) / mod) ** 2 +
+                                          ((Z.imag - Z_try.imag) / mod) ** 2))
+                        if obj < best_obj:
+                            best_obj = obj
+                            best_popt = popt
+                            best_pcov = pcov
+                            Z_fit = Z_try
+                    except Exception:
+                        continue
 
             else:
                 # Multi-start LM
