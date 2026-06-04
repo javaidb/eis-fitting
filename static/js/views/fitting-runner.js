@@ -64,33 +64,37 @@ function pathToSafeId(path) {
   return (path || '').replace(/[^a-zA-Z0-9]/g, '_');
 }
 
+// ── KK tile state helpers ──────────────────────────────────────────────────
+
+function kkTileState(kk) {
+  if (!kk.success)                        return { cls: 'kk-fail', label: 'KK ✗' };
+  if (kk.flagged_indices?.length > 0)     return { cls: 'kk-warn', label: `KK ⚠ ${kk.flagged_indices.length} pts` };
+  return                                           { cls: 'kk-ok',   label: 'KK ✓' };
+}
+
 export function FittingRunnerView(container, { navigate, showToast }) {
-  const resultMap = new Map();
-  const charMap   = new Map();
-  const kkMap     = new Map();  // path → KKResult
+  const resultMap = new Map();   // path → FitResult
+  const charMap   = new Map();   // path → characterization
+  const kkMap     = new Map();   // path → KKResult
 
   let binByField = '';
   let sortByBest = false;
-  let kkExpanded = false;
 
   function getCharFields() {
     const fields = new Set();
-    for (const r of resultMap.values()) {
+    for (const r of resultMap.values())
       for (const k of Object.keys(r.characterization || {})) fields.add(k);
-    }
-    for (const c of charMap.values()) {
+    for (const c of charMap.values())
       for (const k of Object.keys(c)) fields.add(k);
-    }
-    if (!fields.size) {
+    if (!fields.size)
       for (const k of Object.keys(getState().charUnits || {})) fields.add(k);
-    }
     return [...fields].sort();
   }
 
   function rebuildGrid() {
     const tileRoot = container.querySelector('#fit-tile-root');
     if (!tileRoot) return;
-    tileRoot.innerHTML = buildTileGrid(getState().files || [], resultMap);
+    tileRoot.innerHTML = buildTileGrid(getState().files || []);
     wireTileClicks();
   }
 
@@ -173,24 +177,10 @@ export function FittingRunnerView(container, { navigate, showToast }) {
           </select>
         </label>
 
-        <button class="btn btn-danger"   id="stop-btn"  style="display:none;">■ Stop</button>
-        <button class="btn btn-primary"  id="run-btn"   ${!ready ? 'disabled' : ''}>${cached ? '↺ Re-run Fitting' : '▶ Run Fitting'}</button>
-        <button class="btn btn-secondary" id="next-btn" ${!state.fitResults?.length ? 'disabled' : ''}>View Trends →</button>
-      </div>
-
-      <!-- KK validation panel -->
-      <div class="kk-panel" id="kk-panel">
-        <div class="kk-panel-header" id="kk-panel-header">
-          <span>KK Compliance Check</span>
-          <button class="btn btn-secondary" id="kk-run-btn" style="font-size:12px;padding:3px 10px;" ${!ready ? 'disabled' : ''}>
-            Run KK
-          </button>
-          <span id="kk-summary" style="font-size:12px;color:var(--text-muted);margin-left:8px;"></span>
-          <button id="kk-apply-btn" class="btn btn-secondary" style="display:none;font-size:12px;padding:3px 10px;margin-left:auto;">
-            Apply suggested range
-          </button>
-        </div>
-        <div class="kk-panel-body" id="kk-panel-body" style="display:none;"></div>
+        <button class="btn btn-danger"    id="stop-btn"   style="display:none;">■ Stop</button>
+        <button class="btn btn-secondary" id="kk-run-btn" ${!ready ? 'disabled' : ''}>KK Check</button>
+        <button class="btn btn-primary"   id="run-btn"    ${!ready ? 'disabled' : ''}>${cached ? '↺ Re-run Fitting' : '▶ Run Fitting'}</button>
+        <button class="btn btn-secondary" id="next-btn"   ${!state.fitResults?.length ? 'disabled' : ''}>View Trends →</button>
       </div>
 
       <div class="fit-sort-bar">
@@ -205,9 +195,10 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       </div>
 
       <div class="fit-tile-root" id="fit-tile-root">
-        ${buildTileGrid(files, resultMap)}
+        ${buildTileGrid(files)}
       </div>
 
+      <!-- Shared modal for both KK and fit results -->
       <div class="fit-modal-overlay" id="fit-modal" style="display:none;" role="dialog" aria-modal="true">
         <div class="fit-modal-box">
           <div class="fit-modal-header">
@@ -216,12 +207,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
             <button class="fit-modal-close" id="fit-modal-close" aria-label="Close">✕</button>
           </div>
           <div class="fit-modal-meta" id="fit-modal-meta"></div>
-          <div class="fit-modal-tabs" id="fit-modal-tabs">
-            <button class="tab-btn active" data-tab="nyquist">Nyquist</button>
-            <button class="tab-btn" data-tab="bode">Bode</button>
-            <button class="tab-btn" data-tab="residuals">Residuals</button>
-            <button class="tab-btn" data-tab="diagnostics">Diagnostics</button>
-          </div>
+          <div class="fit-modal-tabs" id="fit-modal-tabs"></div>
           <div class="fit-modal-plot" id="fit-modal-plot"></div>
           <div class="params-summary fit-modal-params" id="fit-modal-params"></div>
         </div>
@@ -232,21 +218,18 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     container.querySelector('#next-btn').addEventListener('click', () => navigate(7));
     container.querySelector('#run-btn').addEventListener('click', runFitting);
     container.querySelector('#stop-btn').addEventListener('click', stopFitting);
+    container.querySelector('#kk-run-btn').addEventListener('click', runKK);
     container.querySelector('#clear-cache-link')?.addEventListener('click', e => { e.preventDefault(); runFitting(); });
     container.querySelector('#fit-modal-close').addEventListener('click', closeModal);
     container.querySelector('#fit-modal').addEventListener('click', e => {
       if (e.target === e.currentTarget) closeModal();
     });
-
     container.querySelector('#weight-modulus-cb').addEventListener('change', e => {
       setState({ fitWeightByModulus: e.target.checked });
     });
     container.querySelector('#solver-select').addEventListener('change', e => {
       setState({ fitSolver: e.target.value });
     });
-
-    wireTileClicks();
-
     container.querySelector('#bin-by-select')?.addEventListener('change', e => {
       binByField = e.target.value;
       rebuildGrid();
@@ -256,29 +239,27 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       rebuildGrid();
     });
 
-    // KK panel wiring
-    container.querySelector('#kk-run-btn')?.addEventListener('click', runKK);
-    container.querySelector('#kk-apply-btn')?.addEventListener('click', applyKKRange);
+    wireTileClicks();
   }
 
-  // ── Tile grid ──────────────────────────────────────────────────────────────
+  // ── Tile building ──────────────────────────────────────────────────────────
 
-  function buildTileGrid(files, rMap) {
+  function buildTileGrid(files) {
     if (!files.length) return '';
     const groups = groupFiles(files);
     return [...groups.entries()].map(([, { label, files: gFiles }]) => {
       let displayFiles = [...gFiles];
       if (sortByBest) {
         displayFiles.sort((a, b) => {
-          const ca = rMap.get(a.path)?.circuit_used ?? '￿';
-          const cb = rMap.get(b.path)?.circuit_used ?? '￿';
+          const ca = resultMap.get(a.path)?.circuit_used ?? '￿';
+          const cb = resultMap.get(b.path)?.circuit_used ?? '￿';
           return ca.localeCompare(cb);
         });
       }
       if (binByField) {
         const bins = new Map();
         for (const f of displayFiles) {
-          const char = rMap.get(f.path)?.characterization ?? charMap.get(f.path) ?? {};
+          const char = resultMap.get(f.path)?.characterization ?? charMap.get(f.path) ?? {};
           const val = String(char[binByField] ?? 'N/A');
           if (!bins.has(val)) bins.set(val, []);
           bins.get(val).push(f);
@@ -295,87 +276,283 @@ export function FittingRunnerView(container, { navigate, showToast }) {
                 <div class="fit-subgroup">
                   <div class="fit-subgroup-header">${binByField}: ${val}</div>
                   <div class="fit-tile-row">
-                    ${binFiles.map(f => buildTile(f.filename, f.path, rMap.get(f.path))).join('')}
+                    ${binFiles.map(f => buildTile(f.filename, f.path)).join('')}
                   </div>
                 </div>
               `).join('')}
             </div>
-          </div>
-        `;
+          </div>`;
       }
       return `
         <div class="fit-group">
           <div class="fit-group-header">${label}</div>
           <div class="fit-tile-row">
-            ${displayFiles.map(f => buildTile(f.filename, f.path, rMap.get(f.path))).join('')}
+            ${displayFiles.map(f => buildTile(f.filename, f.path)).join('')}
           </div>
-        </div>
-      `;
+        </div>`;
     }).join('');
   }
 
-  function buildTile(filename, path, result) {
-    const safeId = pathToSafeId(path);
-    if (!result) {
-      return `<div class="fit-tile pending" data-path="${path}" id="tile-${safeId}">
+  function buildTile(filename, path) {
+    const safeId  = pathToSafeId(path);
+    const fitResult = resultMap.get(path);
+    const kkResult  = kkMap.get(path);
+
+    if (fitResult) {
+      const good = fitResult.success && fitResult.residual != null && fitResult.residual < GOOD_THRESHOLD;
+      const cls  = fitResult.success ? (good ? 'good' : 'poor') : 'failed';
+      const pct  = fitResult.residual != null ? `${(fitResult.residual * 100).toFixed(1)}%` : '—';
+      return `<div class="fit-tile ${cls}" data-path="${path}" id="tile-${safeId}">
         <div class="fit-tile-name">${filename}</div>
-        <div class="fit-tile-pct">—</div>
+        <div class="fit-tile-pct">${fitResult.success ? pct : 'FAILED'}</div>
       </div>`;
     }
-    const good = result.success && result.residual != null && result.residual < GOOD_THRESHOLD;
-    const cls = result.success ? (good ? 'good' : 'poor') : 'failed';
-    const pct = result.residual != null ? `${(result.residual * 100).toFixed(1)}%` : '—';
-    return `<div class="fit-tile ${cls}" data-path="${path}" id="tile-${safeId}">
+
+    if (kkResult) {
+      const { cls, label } = kkTileState(kkResult);
+      return `<div class="fit-tile ${cls}" data-path="${path}" id="tile-${safeId}">
+        <div class="fit-tile-name">${filename}</div>
+        <div class="fit-tile-pct">${label}</div>
+      </div>`;
+    }
+
+    return `<div class="fit-tile pending" data-path="${path}" id="tile-${safeId}">
       <div class="fit-tile-name">${filename}</div>
-      <div class="fit-tile-pct">${result.success ? pct : 'FAILED'}</div>
+      <div class="fit-tile-pct">—</div>
     </div>`;
   }
 
   function wireTileClicks() {
     container.querySelectorAll('.fit-tile:not(.pending)').forEach(el => {
       el.addEventListener('click', () => {
-        const result = resultMap.get(el.dataset.path);
-        if (result) openModal(result);
+        const path      = el.dataset.path;
+        const fitResult = resultMap.get(path);
+        const kkResult  = kkMap.get(path);
+        if      (fitResult) openFitModal(fitResult);
+        else if (kkResult)  openKKModal(kkResult);
       });
     });
   }
 
-  function updateTile(result, path) {
+  // Live update helpers called during streaming
+
+  function updateFitTile(fitResult, path) {
     const el = container.querySelector(`#tile-${pathToSafeId(path)}`);
     if (!el) return;
-    const good = result.success && result.residual != null && result.residual < GOOD_THRESHOLD;
-    const cls = result.success ? (good ? 'good' : 'poor') : 'failed';
-    const pct = result.residual != null ? `${(result.residual * 100).toFixed(1)}%` : '—';
+    const good = fitResult.success && fitResult.residual != null && fitResult.residual < GOOD_THRESHOLD;
+    const cls  = fitResult.success ? (good ? 'good' : 'poor') : 'failed';
+    const pct  = fitResult.residual != null ? `${(fitResult.residual * 100).toFixed(1)}%` : '—';
     el.className = `fit-tile ${cls}`;
-    el.querySelector('.fit-tile-pct').textContent = result.success ? pct : 'FAILED';
+    el.querySelector('.fit-tile-pct').textContent = fitResult.success ? pct : 'FAILED';
     const fresh = el.cloneNode(true);
-    fresh.addEventListener('click', () => openModal(result));
+    fresh.addEventListener('click', () => openFitModal(fitResult));
     el.replaceWith(fresh);
   }
 
-  // ── Modal ──────────────────────────────────────────────────────────────────
+  function updateKKTile(kkResult, path) {
+    // Don't overwrite a tile that already has a fit result
+    if (resultMap.has(path)) return;
+    const el = container.querySelector(`#tile-${pathToSafeId(path)}`);
+    if (!el) return;
+    const { cls, label } = kkTileState(kkResult);
+    el.className = `fit-tile ${cls}`;
+    el.querySelector('.fit-tile-pct').textContent = label;
+    const fresh = el.cloneNode(true);
+    fresh.addEventListener('click', () => openKKModal(kkResult));
+    el.replaceWith(fresh);
+  }
 
-  function openModal(result) {
+  // ── KK modal ───────────────────────────────────────────────────────────────
+
+  function openKKModal(kk) {
     const modal    = container.querySelector('#fit-modal');
     const titleEl  = container.querySelector('#fit-modal-title');
     const badgeEl  = container.querySelector('#fit-modal-badge');
     const metaEl   = container.querySelector('#fit-modal-meta');
     const plotEl   = container.querySelector('#fit-modal-plot');
     const paramsEl = container.querySelector('#fit-modal-params');
+    const tabsEl   = container.querySelector('#fit-modal-tabs');
+
+    titleEl.textContent = kk.filename;
+
+    // Badge
+    const { cls: kkCls, label: kkLabel } = kkTileState(kk);
+    const badgeClass = kkCls === 'kk-ok' ? 'good' : kkCls === 'kk-warn' ? 'poor' : 'failed';
+    badgeEl.className = `residual-badge ${badgeClass}`;
+    badgeEl.textContent = kk.success ? kkLabel : 'KK ✗';
+
+    // Meta line
+    const metaParts = [];
+    if (kk.M  != null) metaParts.push(`M = ${kk.M} RC elements`);
+    if (kk.mu != null) metaParts.push(`μ = ${kk.mu.toFixed(3)}`);
+    if (kk.error)      metaParts.push(kk.error);
+    metaEl.textContent = metaParts.join(' · ');
+
+    // Tabs: Nyquist (KK) + Residuals
+    tabsEl.innerHTML = '';
+    [
+      { id: 'kk-nyquist',   label: 'Nyquist (KK)' },
+      { id: 'kk-residuals', label: 'KK Residuals' },
+    ].forEach(({ id, label }, idx) => {
+      const btn = document.createElement('button');
+      btn.className = `tab-btn${idx === 0 ? ' active' : ''}`;
+      btn.dataset.tab = id;
+      btn.textContent = label;
+      tabsEl.appendChild(btn);
+    });
+
+    tabsEl.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        tabsEl.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        plotEl.innerHTML = '';
+        requestAnimationFrame(() => {
+          if (btn.dataset.tab === 'kk-nyquist') plotKKNyquist(kk, plotEl);
+          else                                   plotKKResiduals(kk, plotEl);
+        });
+      });
+    });
+
+    // Bottom action: apply suggested range
+    paramsEl.innerHTML = '';
+    if (kk.freq_min_suggest != null) {
+      paramsEl.innerHTML = `
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+          <span style="font-size:12px;color:var(--text-muted);">
+            Suggested compliant range:
+            <strong style="color:var(--text);">
+              ${kk.freq_min_suggest.toPrecision(3)} – ${kk.freq_max_suggest.toPrecision(3)} Hz
+            </strong>
+          </span>
+          <button class="btn btn-secondary" id="modal-kk-apply" style="font-size:12px;padding:4px 12px;">
+            Apply to freq filter
+          </button>
+        </div>`;
+      container.querySelector('#modal-kk-apply').addEventListener('click', () => {
+        const minEl = container.querySelector('#freq-min');
+        const maxEl = container.querySelector('#freq-max');
+        if (minEl) minEl.value = kk.freq_min_suggest;
+        if (maxEl) maxEl.value = kk.freq_max_suggest;
+        closeModal();
+        showToast('Frequency range applied — re-run fitting to use it.', 'success');
+      });
+    }
+
+    plotEl.innerHTML = '';
+    modal.style.display = 'flex';
+    requestAnimationFrame(() => plotKKNyquist(kk, plotEl));
+  }
+
+  function plotKKNyquist(kk, el) {
+    if (!el || typeof Plotly === 'undefined') return;
+    if (!kk.z_real?.length) {
+      el.innerHTML = '<p style="color:var(--text-muted);padding:24px;">No impedance data available.</p>';
+      return;
+    }
+
+    const flagged = new Set(kk.flagged_indices || []);
+    const goodIdx = kk.z_real.map((_, i) => i).filter(i => !flagged.has(i));
+    const badIdx  = [...flagged];
+
+    const traces = [{
+      x: goodIdx.map(i => kk.z_real[i]),
+      y: goodIdx.map(i => -kk.z_imag[i]),
+      mode: 'markers', name: 'Compliant',
+      marker: { color: '#4caf7d', size: 7 },
+      text: goodIdx.map(i => `${kk.frequencies[i] != null ? kk.frequencies[i].toPrecision(4) : ''} Hz`),
+      hovertemplate: "%{text}<br>Z'=%{x:.4g} Ω<br>-Z''=%{y:.4g} Ω<extra></extra>",
+    }];
+
+    if (badIdx.length) {
+      traces.push({
+        x: badIdx.map(i => kk.z_real[i]),
+        y: badIdx.map(i => -kk.z_imag[i]),
+        mode: 'markers', name: 'Flagged (|KK res| > 1%)',
+        marker: { color: '#e05c5c', size: 10, symbol: 'x', line: { color: '#e05c5c', width: 2 } },
+        text: badIdx.map(i => `${kk.frequencies[i] != null ? kk.frequencies[i].toPrecision(4) : ''} Hz (flagged)`),
+        hovertemplate: "%{text}<br>Z'=%{x:.4g} Ω<br>-Z''=%{y:.4g} Ω<extra></extra>",
+      });
+    }
+
+    Plotly.newPlot(el, traces, {
+      paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+      margin: { t: 8, r: 16, b: 48, l: 64 },
+      font:   { color: '#8892b0', size: 11 },
+      xaxis:  { title: "Z' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: false },
+      yaxis:  { title: "-Z'' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: false, scaleanchor: 'x', scaleratio: 1 },
+      legend: { x: 0.5, y: 0.95, font: { size: 10 } },
+      showlegend: true,
+    }, { displayModeBar: false, responsive: true });
+  }
+
+  function plotKKResiduals(kk, el) {
+    if (!el || typeof Plotly === 'undefined' || !kk.frequencies?.length) {
+      el.innerHTML = '<p style="color:var(--text-muted);padding:24px;">No KK residual data.</p>';
+      return;
+    }
+
+    const flagged = new Set(kk.flagged_indices || []);
+    const pointColors = kk.frequencies.map((_, i) =>
+      flagged.has(i) ? '#e05c5c' : '#4ecdc4'
+    );
+
+    const freqArr = kk.frequencies;
+    const f0 = freqArr[0], f1 = freqArr[freqArr.length - 1];
+
+    Plotly.newPlot(el, [
+      {
+        x: freqArr, y: kk.res_real.map(v => Math.abs(v) * 100),
+        mode: 'markers+lines', name: "|ΔZ'| / |Z|",
+        marker: { color: pointColors, size: 6 },
+        line: { color: '#e05c5c', width: 1 },
+        hovertemplate: "%{x:.4g} Hz<br>|ΔZ'|/|Z| = %{y:.3f}%<extra></extra>",
+      },
+      {
+        x: freqArr, y: kk.res_imag.map(v => Math.abs(v) * 100),
+        mode: 'markers+lines', name: "|ΔZ''| / |Z|",
+        marker: { color: pointColors, size: 6, symbol: 'diamond' },
+        line: { color: '#4a9ade', width: 1 },
+        hovertemplate: "%{x:.4g} Hz<br>|ΔZ''|/|Z| = %{y:.3f}%<extra></extra>",
+      },
+      {
+        x: [f0, f1], y: [1, 1],
+        mode: 'lines', name: '1 % threshold',
+        line: { color: '#aaa', dash: 'dot', width: 1.5 },
+      },
+    ], {
+      paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+      margin: { t: 8, r: 16, b: 48, l: 64 },
+      font:   { color: '#8892b0', size: 11 },
+      xaxis:  { title: 'Frequency (Hz)', type: 'log', color: '#8892b0', gridcolor: '#2d3147', zeroline: false },
+      yaxis:  { title: 'KK residual (%)', color: '#8892b0', gridcolor: '#2d3147', zeroline: true, zerolinecolor: '#4a5080' },
+      legend: { x: 0.5, y: 0.95, font: { size: 10 } },
+      showlegend: true,
+    }, { displayModeBar: false, responsive: true });
+  }
+
+  // ── Fit modal ──────────────────────────────────────────────────────────────
+
+  function openFitModal(result) {
+    const modal    = container.querySelector('#fit-modal');
+    const titleEl  = container.querySelector('#fit-modal-title');
+    const badgeEl  = container.querySelector('#fit-modal-badge');
+    const metaEl   = container.querySelector('#fit-modal-meta');
+    const plotEl   = container.querySelector('#fit-modal-plot');
+    const paramsEl = container.querySelector('#fit-modal-params');
+    const tabsEl   = container.querySelector('#fit-modal-tabs');
 
     titleEl.textContent = result.filename;
 
     const good = result.success && result.residual != null && result.residual < GOOD_THRESHOLD;
-    const qualClass = result.success ? (good ? 'good' : 'poor') : 'failed';
-    const residualPct = result.residual != null ? (result.residual * 100).toFixed(2) : '—';
-    badgeEl.className = `residual-badge ${qualClass}`;
-    badgeEl.textContent = result.success ? `${residualPct}%` : 'FAILED';
+    badgeEl.className = `residual-badge ${result.success ? (good ? 'good' : 'poor') : 'failed'}`;
+    badgeEl.textContent = result.success
+      ? `${(result.residual * 100).toFixed(2)}%`
+      : 'FAILED';
 
-    const charStr = Object.entries(result.characterization || {})
-      .map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toPrecision(4) : v}`)
-      .join(' · ');
+    const charStr   = Object.entries(result.characterization || {})
+      .map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toPrecision(4) : v}`).join(' · ');
     const circuitStr = result.circuit_used ? `Circuit: ${result.circuit_used}` : '';
-    metaEl.textContent = [charStr, circuitStr].filter(s => s).join(' · ');
+    metaEl.textContent = [charStr, circuitStr].filter(Boolean).join(' · ');
     if (result.error) metaEl.textContent += (metaEl.textContent ? ' · ' : '') + result.error;
 
     paramsEl.innerHTML = Object.entries(result.parameters || {})
@@ -385,36 +562,39 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         const warn = typeof v === 'number' ? checkPhysical(k, v) : null;
         const warnHtml = warn ? ` <span class="param-warn" title="${warn}">⚠</span>` : '';
         return `<span>${k}${warnHtml}</span>${disp}${unit ? ' ' + unit : ''}`;
-      })
-      .join(' &nbsp; ');
+      }).join(' &nbsp; ');
 
-    const tabsEl = container.querySelector('#fit-modal-tabs');
-    const freshTabs = tabsEl.cloneNode(true);
-    tabsEl.replaceWith(freshTabs);
+    // Build tabs
+    tabsEl.innerHTML = '';
+    const tabDefs = [
+      { id: 'nyquist',     label: 'Nyquist' },
+      { id: 'bode',        label: 'Bode' },
+      { id: 'residuals',   label: 'Residuals' },
+    ];
+    if (result.variants_tried?.length > 1)
+      tabDefs.push({ id: 'variants', label: `Variants (${result.variants_tried.length})` });
+    tabDefs.push({ id: 'diagnostics', label: 'Diagnostics' });
 
-    freshTabs.querySelector('[data-tab="variants"]')?.remove();
-    if (result.variants_tried?.length > 1) {
-      const vBtn = document.createElement('button');
-      vBtn.className = 'tab-btn';
-      vBtn.dataset.tab = 'variants';
-      vBtn.textContent = `Variants (${result.variants_tried.length})`;
-      // Insert before Diagnostics tab
-      const diagBtn = freshTabs.querySelector('[data-tab="diagnostics"]');
-      freshTabs.insertBefore(vBtn, diagBtn);
-    }
+    tabDefs.forEach(({ id, label }, idx) => {
+      const btn = document.createElement('button');
+      btn.className = `tab-btn${idx === 0 ? ' active' : ''}`;
+      btn.dataset.tab = id;
+      btn.textContent = label;
+      tabsEl.appendChild(btn);
+    });
 
-    freshTabs.querySelectorAll('.tab-btn').forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.tab === 'nyquist');
+    tabsEl.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        freshTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        tabsEl.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         plotEl.innerHTML = '';
         requestAnimationFrame(() => {
-          if      (btn.dataset.tab === 'nyquist')     plotNyquist(result, plotEl);
-          else if (btn.dataset.tab === 'bode')        plotBode(result, plotEl);
-          else if (btn.dataset.tab === 'variants')    plotVariants(result, plotEl);
-          else if (btn.dataset.tab === 'diagnostics') plotDiagnostics(result, plotEl);
-          else                                        plotResiduals(result, plotEl);
+          const t = btn.dataset.tab;
+          if      (t === 'nyquist')     plotNyquist(result, plotEl);
+          else if (t === 'bode')        plotBode(result, plotEl);
+          else if (t === 'variants')    plotVariants(result, plotEl);
+          else if (t === 'diagnostics') plotDiagnostics(result, plotEl);
+          else                          plotResiduals(result, plotEl);
         });
       });
     });
@@ -429,12 +609,66 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     container.querySelector('#fit-modal-plot').innerHTML = '';
   }
 
+  // ── KK run ─────────────────────────────────────────────────────────────────
+
+  async function runKK() {
+    const state = getState();
+    if (!state.files?.length || !state.columnMap) return;
+
+    const kkBtn = container.querySelector('#kk-run-btn');
+    kkBtn.disabled = true;
+    kkBtn.textContent = 'KK…';
+
+    kkMap.clear();
+    // Reset all tiles without fit results back to pending so KK state starts fresh
+    rebuildGrid();
+    wireTileClicks();
+
+    const freqMinVal = container.querySelector('#freq-min').value.trim();
+    const freqMaxVal = container.querySelector('#freq-max').value.trim();
+    const filePaths  = state.files.map(f => f.path);
+    const kkResults  = [];
+
+    const request = {
+      files:       state.files,
+      column_map:  { ...state.columnMap, decimal_places: state.charDecimalPlaces ?? {} },
+      freq_min:    freqMinVal !== '' ? parseFloat(freqMinVal) : null,
+      freq_max:    freqMaxVal !== '' ? parseFloat(freqMaxVal) : null,
+    };
+
+    try {
+      for await (const event of streamKK(request)) {
+        if (event.event === 'progress') {
+          // Could update a status label here if needed
+        } else if (event.event === 'result') {
+          const r = event.data;
+          const path = filePaths[kkResults.length];
+          kkResults.push(r);
+          kkMap.set(path, r);
+          updateKKTile(r, path);
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        } else if (event.event === 'done') {
+          const nFlagged = kkResults.filter(r => r.success && r.flagged_indices?.length > 0).length;
+          const nFail    = kkResults.filter(r => !r.success).length;
+          const nOk      = kkResults.length - nFlagged - nFail;
+          showToast(
+            `KK: ${nOk} compliant · ${nFlagged} flagged · ${nFail} failed`,
+            nFail > 0 ? 'error' : nFlagged > 0 ? 'info' : 'success',
+          );
+        }
+      }
+    } catch (err) {
+      showToast(`KK error: ${err.message}`, 'error');
+    }
+
+    kkBtn.disabled = false;
+    kkBtn.textContent = 'KK Check';
+  }
+
   // ── Fitting run ────────────────────────────────────────────────────────────
 
   let _abortCtrl = null;
-
   function stopFitting() { _abortCtrl?.abort(); }
-
   function onKeyDown(e) { if (e.key === 'Escape') closeModal(); }
 
   async function runFitting() {
@@ -447,22 +681,20 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     const fitStatus     = container.querySelector('#fit-status');
     const progressBar   = container.querySelector('#progress-bar');
     const progressLabel = container.querySelector('#progress-label');
-    const tileRoot      = container.querySelector('#fit-tile-root');
 
     const filePaths = state.files.map(f => f.path);
-
     _abortCtrl = new AbortController();
-    runBtn.disabled = true;
+    runBtn.disabled  = true;
     stopBtn.style.display = '';
     fitStatus.style.display = '';
 
     resultMap.clear();
     setState({ fitCacheKey: null, fitResults: [] });
-    tileRoot.innerHTML = buildTileGrid(state.files, resultMap);
+    // Rebuild so KK tiles (if any) are still visible while fit is running
+    rebuildGrid();
 
     const results = [];
-    let stopped = false;
-    let gotDone = false;
+    let stopped = false, gotDone = false;
 
     const timeout         = parseFloat(container.querySelector('#fit-timeout').value) || 60;
     const freqMinVal      = container.querySelector('#freq-min').value.trim();
@@ -471,25 +703,23 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     const freqMax         = freqMaxVal !== '' ? parseFloat(freqMaxVal) : null;
     const weightByModulus = container.querySelector('#weight-modulus-cb').checked;
     const solver          = container.querySelector('#solver-select').value;
-    const runCacheKey = configKey({
-      ...state, fitTimeout: timeout, fitFreqMin: freqMin, fitFreqMax: freqMax,
-      fitWeightByModulus: weightByModulus, fitSolver: solver,
-    });
+    const runCacheKey = configKey({ ...state, fitTimeout: timeout, fitFreqMin: freqMin,
+                                   fitFreqMax: freqMax, fitWeightByModulus: weightByModulus, fitSolver: solver });
 
     try {
       setState({ fitTimeout: timeout, fitFreqMin: freqMin, fitFreqMax: freqMax,
                  fitWeightByModulus: weightByModulus, fitSolver: solver });
 
       const request = {
-        files:              state.files,
-        column_map:         { ...state.columnMap, decimal_places: state.charDecimalPlaces ?? {} },
-        circuit_config:     state.circuitConfig,
-        fit_timeout:        timeout,
-        optimize_config:    state.optimizeConfig ?? { enabled: false },
-        freq_min:           freqMin,
-        freq_max:           freqMax,
-        weight_by_modulus:  weightByModulus,
-        solver:             solver,
+        files:             state.files,
+        column_map:        { ...state.columnMap, decimal_places: state.charDecimalPlaces ?? {} },
+        circuit_config:    state.circuitConfig,
+        fit_timeout:       timeout,
+        optimize_config:   state.optimizeConfig ?? { enabled: false },
+        freq_min:          freqMin,
+        freq_max:          freqMax,
+        weight_by_modulus: weightByModulus,
+        solver:            solver,
       };
 
       for await (const event of streamFitting(request, _abortCtrl.signal)) {
@@ -499,10 +729,10 @@ export function FittingRunnerView(container, { navigate, showToast }) {
           progressLabel.textContent = `Fitting ${event.file} (${event.index + 1} / ${event.total})`;
         } else if (event.event === 'result') {
           const result = event.data;
-          const path = filePaths[results.length];
+          const path   = filePaths[results.length];
           results.push(result);
           resultMap.set(path, result);
-          updateTile(result, path);
+          updateFitTile(result, path);
           await new Promise(r => requestAnimationFrame(r));
         } else if (event.event === 'done') {
           gotDone = true;
@@ -523,194 +753,85 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       runBtn.disabled  = false;
       stopBtn.style.display = 'none';
       nextBtn.disabled = !results.length;
-      const completed = !stopped && gotDone;
       setState({
         fitResults:  results,
-        fitCacheKey: completed ? runCacheKey : null,
+        fitCacheKey: (!stopped && gotDone) ? runCacheKey : null,
         maxStep:     Math.max(state.maxStep, 7),
       });
       render();
     }
   }
 
-  // ── KK validation ──────────────────────────────────────────────────────────
+  // ── Fit plot functions ─────────────────────────────────────────────────────
 
-  let _kkSuggestMin = null;
-  let _kkSuggestMax = null;
-
-  async function runKK() {
-    const state = getState();
-    if (!state.files?.length || !state.columnMap) return;
-
-    const kkRunBtn  = container.querySelector('#kk-run-btn');
-    const kkSummary = container.querySelector('#kk-summary');
-    const kkBody    = container.querySelector('#kk-panel-body');
-    const kkApply   = container.querySelector('#kk-apply-btn');
-
-    kkRunBtn.disabled = true;
-    kkRunBtn.textContent = 'Running…';
-    kkBody.style.display = 'block';
-    kkBody.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">Running Kramers-Kronig check…</span>';
-    kkMap.clear();
-    _kkSuggestMin = null;
-    _kkSuggestMax = null;
-
-    const freqMinVal = container.querySelector('#freq-min').value.trim();
-    const freqMaxVal = container.querySelector('#freq-max').value.trim();
-
-    const request = {
-      files:       state.files,
-      column_map:  { ...state.columnMap, decimal_places: state.charDecimalPlaces ?? {} },
-      freq_min:    freqMinVal !== '' ? parseFloat(freqMinVal) : null,
-      freq_max:    freqMaxVal !== '' ? parseFloat(freqMaxVal) : null,
-    };
-
-    const filePaths = state.files.map(f => f.path);
-    const kkResults = [];
-
-    try {
-      for await (const event of streamKK(request)) {
-        if (event.event === 'result') {
-          const r = event.data;
-          const path = filePaths[kkResults.length];
-          kkResults.push(r);
-          kkMap.set(path, r);
-        }
-      }
-    } catch (err) {
-      showToast(`KK error: ${err.message}`, 'error');
+  function plotNyquist(result, el) {
+    if (!el || typeof Plotly === 'undefined') return;
+    const traces = [];
+    if (result.z_real_data?.length) {
+      traces.push({ x: result.z_real_data, y: result.z_imag_data.map(v => -v),
+        mode: 'markers', type: 'scatter', name: 'Data',
+        marker: { color: '#8892b0', size: 5 } });
     }
-
-    // Summarise
-    const nFailed  = kkResults.filter(r => !r.success).length;
-    const nFlagged = kkResults.filter(r => r.success && r.flagged_indices?.length > 0).length;
-    const nClean   = kkResults.filter(r => r.success && r.flagged_indices?.length === 0).length;
-
-    // Aggregate suggested range (conservative: tightest range across all files)
-    const suggests = kkResults.filter(r => r.success && r.freq_min_suggest != null);
-    if (suggests.length) {
-      _kkSuggestMin = Math.max(...suggests.map(r => r.freq_min_suggest));
-      _kkSuggestMax = Math.min(...suggests.map(r => r.freq_max_suggest));
+    if (result.success && result.z_real_fit?.length) {
+      traces.push({ x: result.z_real_fit, y: result.z_imag_fit.map(v => -v),
+        mode: 'lines', type: 'scatter', name: 'Fit',
+        line: { color: 'var(--accent)', width: 2 } });
     }
-
-    kkSummary.innerHTML = [
-      nClean   ? `<span style="color:var(--success)">${nClean} compliant</span>` : '',
-      nFlagged ? `<span style="color:var(--warning)">${nFlagged} have flagged points</span>` : '',
-      nFailed  ? `<span style="color:var(--danger)">${nFailed} failed</span>` : '',
-    ].filter(Boolean).join(' · ');
-
-    if (_kkSuggestMin != null && _kkSuggestMax != null) {
-      kkSummary.innerHTML += ` · Suggested range: ${_kkSuggestMin.toPrecision(3)}–${_kkSuggestMax.toPrecision(3)} Hz`;
-      kkApply.style.display = '';
-    }
-
-    // Show KK residual plot for first successful result
-    const firstOk = kkResults.find(r => r.success && r.frequencies?.length);
-    kkBody.innerHTML = '';
-    if (firstOk) {
-      const plotDiv = document.createElement('div');
-      plotDiv.style.height = '200px';
-      kkBody.appendChild(plotDiv);
-      renderKKPlot(firstOk, plotDiv);
-    }
-
-    kkRunBtn.disabled = false;
-    kkRunBtn.textContent = 'Re-run KK';
-  }
-
-  function renderKKPlot(kk, el) {
-    if (typeof Plotly === 'undefined' || !kk.frequencies?.length) return;
-    const threshLine = { x: [kk.frequencies[0], kk.frequencies[kk.frequencies.length - 1]],
-                         y: [1, 1], mode: 'lines', name: '1% threshold',
-                         line: { color: '#888', dash: 'dot', width: 1 }, showlegend: false };
-    Plotly.newPlot(el, [
-      { x: kk.frequencies, y: kk.res_real.map(v => Math.abs(v) * 100),
-        mode: 'markers+lines', name: "|Δ Z'|", marker: { color: '#e05c5c', size: 4 },
-        line: { color: '#e05c5c', width: 1 } },
-      { x: kk.frequencies, y: kk.res_imag.map(v => Math.abs(v) * 100),
-        mode: 'markers+lines', name: "|Δ Z''|", marker: { color: '#4a9ade', size: 4 },
-        line: { color: '#4a9ade', width: 1 } },
-      threshLine,
-    ], {
+    Plotly.newPlot(el, traces, {
       paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-      margin: { t: 8, r: 16, b: 40, l: 52 },
-      font:   { color: '#8892b0', size: 10 },
-      xaxis:  { title: 'Frequency (Hz)', type: 'log', color: '#8892b0', gridcolor: '#2d3147' },
-      yaxis:  { title: 'KK residual (%)', color: '#8892b0', gridcolor: '#2d3147', zeroline: true },
-      legend: { x: 0.6, y: 0.95, font: { size: 9 } },
+      margin: { t: 8, r: 16, b: 48, l: 64 },
+      font:   { color: '#8892b0', size: 11 },
+      xaxis:  { title: "Z' (Ω)",  color: '#8892b0', gridcolor: '#2d3147', zeroline: false },
+      yaxis:  { title: "-Z'' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: false, scaleanchor: 'x', scaleratio: 1 },
+      legend: { x: 0.7, y: 0.95, font: { size: 10 } },
+      showlegend: true,
     }, { displayModeBar: false, responsive: true });
   }
-
-  function applyKKRange() {
-    if (_kkSuggestMin == null) return;
-    const minEl = container.querySelector('#freq-min');
-    const maxEl = container.querySelector('#freq-max');
-    if (minEl) minEl.value = _kkSuggestMin;
-    if (maxEl) maxEl.value = _kkSuggestMax;
-    showToast('Suggested frequency range applied.', 'success');
-  }
-
-  // ── Plot functions ─────────────────────────────────────────────────────────
 
   function plotBode(result, el) {
     if (!el || typeof Plotly === 'undefined') return;
     const freqs = result.frequencies;
     if (!freqs?.length) { el.textContent = 'No frequency data'; return; }
-
-    const dataMag   = result.z_real_data.map((r, i) => Math.sqrt(r ** 2 + result.z_imag_data[i] ** 2));
+    const dataMag   = result.z_real_data.map((r, i) => Math.sqrt(r**2 + result.z_imag_data[i]**2));
     const dataPhase = result.z_real_data.map((r, i) => Math.atan2(result.z_imag_data[i], r) * 180 / Math.PI);
-
     const traces = [
-      { x: freqs, y: dataMag,   mode: 'markers', name: '|Z| data',   marker: { color: '#8892b0', size: 5 }, xaxis: 'x',  yaxis: 'y'  },
-      { x: freqs, y: dataPhase, mode: 'markers', name: 'Phase data', marker: { color: '#8892b0', size: 5 }, xaxis: 'x2', yaxis: 'y2' },
+      { x: freqs, y: dataMag,   mode: 'markers', name: '|Z| data',   marker: { color: '#8892b0', size: 5 }, xaxis:'x',  yaxis:'y'  },
+      { x: freqs, y: dataPhase, mode: 'markers', name: 'Phase data', marker: { color: '#8892b0', size: 5 }, xaxis:'x2', yaxis:'y2' },
     ];
-
     if (result.success && result.z_real_fit?.length) {
-      const fitMag   = result.z_real_fit.map((r, i) => Math.sqrt(r ** 2 + result.z_imag_fit[i] ** 2));
+      const fitMag   = result.z_real_fit.map((r, i) => Math.sqrt(r**2 + result.z_imag_fit[i]**2));
       const fitPhase = result.z_real_fit.map((r, i) => Math.atan2(result.z_imag_fit[i], r) * 180 / Math.PI);
-      traces.push({ x: freqs, y: fitMag,   mode: 'lines', name: '|Z| fit',   line: { color: 'var(--accent)', width: 2 },              xaxis: 'x',  yaxis: 'y'  });
-      traces.push({ x: freqs, y: fitPhase, mode: 'lines', name: 'Phase fit', line: { color: 'var(--accent)', width: 2, dash: 'dash' }, xaxis: 'x2', yaxis: 'y2' });
+      traces.push({ x: freqs, y: fitMag,   mode: 'lines', name: '|Z| fit',   line: { color:'var(--accent)', width:2 },             xaxis:'x',  yaxis:'y'  });
+      traces.push({ x: freqs, y: fitPhase, mode: 'lines', name: 'Phase fit', line: { color:'var(--accent)', width:2, dash:'dash' }, xaxis:'x2', yaxis:'y2' });
     }
-
-    const axisStyle = { type: 'log', color: '#8892b0', gridcolor: '#2d3147', zeroline: false };
+    const ax = { type:'log', color:'#8892b0', gridcolor:'#2d3147', zeroline:false };
     Plotly.newPlot(el, traces, {
-      grid: { rows: 2, columns: 1, pattern: 'independent' },
-      paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-      margin: { t: 8, r: 16, b: 48, l: 64 },
-      font:   { color: '#8892b0', size: 11 },
-      xaxis:  { ...axisStyle, title: 'Frequency (Hz)' },
-      yaxis:  { ...axisStyle, title: '|Z| (Ω)' },
-      xaxis2: { ...axisStyle, title: 'Frequency (Hz)' },
-      yaxis2: { type: 'linear', color: '#8892b0', gridcolor: '#2d3147', title: 'Phase (°)' },
+      grid: { rows:2, columns:1, pattern:'independent' },
+      paper_bgcolor:'transparent', plot_bgcolor:'transparent',
+      margin:{t:8,r:16,b:48,l:64}, font:{color:'#8892b0',size:11},
+      xaxis:{...ax, title:'Frequency (Hz)'}, yaxis:{...ax, title:'|Z| (Ω)'},
+      xaxis2:{...ax, title:'Frequency (Hz)'}, yaxis2:{type:'linear',color:'#8892b0',gridcolor:'#2d3147',title:'Phase (°)'},
       showlegend: false,
-    }, { displayModeBar: false, responsive: true });
+    }, { displayModeBar:false, responsive:true });
   }
 
   function plotResiduals(result, el) {
     if (!el || typeof Plotly === 'undefined') return;
-    const freqs = result.frequencies;
-    if (!freqs?.length || !result.success || !result.z_real_fit?.length) {
-      el.textContent = 'No residuals available';
-      return;
+    if (!result.frequencies?.length || !result.success || !result.z_real_fit?.length) {
+      el.textContent = 'No residuals available'; return;
     }
-
-    const realRes = result.z_real_data.map((r, i) =>
-      (r - result.z_real_fit[i]) / (Math.abs(r) + 1e-12) * 100);
-    const imagRes = result.z_imag_data.map((v, i) =>
-      (v - result.z_imag_fit[i]) / (Math.abs(v) + 1e-12) * 100);
-
+    const realRes = result.z_real_data.map((r, i) => (r - result.z_real_fit[i]) / (Math.abs(r) + 1e-12) * 100);
+    const imagRes = result.z_imag_data.map((v, i) => (v - result.z_imag_fit[i]) / (Math.abs(v) + 1e-12) * 100);
     Plotly.newPlot(el, [
-      { x: freqs, y: realRes, mode: 'markers+lines', name: "Z' residual",  marker: { color: '#e05c5c', size: 4 }, line: { color: '#e05c5c', width: 1 } },
-      { x: freqs, y: imagRes, mode: 'markers+lines', name: "Z'' residual", marker: { color: '#4a9ade', size: 4 }, line: { color: '#4a9ade', width: 1 } },
+      { x: result.frequencies, y: realRes, mode:'markers+lines', name:"Z' residual",  marker:{color:'#e05c5c',size:4}, line:{color:'#e05c5c',width:1} },
+      { x: result.frequencies, y: imagRes, mode:'markers+lines', name:"Z'' residual", marker:{color:'#4a9ade',size:4}, line:{color:'#4a9ade',width:1} },
     ], {
-      paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-      margin: { t: 8, r: 16, b: 48, l: 64 },
-      font:   { color: '#8892b0', size: 11 },
-      xaxis:  { title: 'Frequency (Hz)', type: 'log', color: '#8892b0', gridcolor: '#2d3147', zeroline: false },
-      yaxis:  { title: 'Residual (%)', color: '#8892b0', gridcolor: '#2d3147', zeroline: true, zerolinecolor: '#4a5080' },
-      legend: { x: 0.6, y: 0.95, font: { size: 10 } },
-      showlegend: true,
-    }, { displayModeBar: false, responsive: true });
+      paper_bgcolor:'transparent', plot_bgcolor:'transparent',
+      margin:{t:8,r:16,b:48,l:64}, font:{color:'#8892b0',size:11},
+      xaxis:{title:'Frequency (Hz)',type:'log',color:'#8892b0',gridcolor:'#2d3147',zeroline:false},
+      yaxis:{title:'Residual (%)',color:'#8892b0',gridcolor:'#2d3147',zeroline:true,zerolinecolor:'#4a5080'},
+      legend:{x:0.6,y:0.95,font:{size:10}}, showlegend:true,
+    }, { displayModeBar:false, responsive:true });
   }
 
   function plotDiagnostics(result, el) {
@@ -718,15 +839,11 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       el.innerHTML = '<p style="color:var(--text-muted);padding:16px 0;">No diagnostics — fit failed.</p>';
       return;
     }
+    const chiNu = result.chi_sq_nu, rmse = result.rmse;
+    const corr  = result.correlation;
+    const names = result.param_names || Object.keys(result.parameters || {});
 
-    const chiNu  = result.chi_sq_nu;
-    const rmse   = result.rmse;
-    const corr   = result.correlation;
-    const names  = result.param_names || Object.keys(result.parameters || {});
-
-    // χ²_ν interpretation
-    let chiClass = '';
-    let chiNote  = '';
+    let chiClass = '', chiNote = '';
     if (chiNu != null) {
       if      (chiNu < 0.5)  { chiClass = 'color:var(--accent)';  chiNote = 'possible overfitting'; }
       else if (chiNu < 2.0)  { chiClass = 'color:var(--success)'; chiNote = 'good fit'; }
@@ -734,42 +851,38 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       else                   { chiClass = 'color:var(--danger)';   chiNote = 'very poor fit'; }
     }
 
-    // Correlation matrix HTML (color-coded)
     let corrHTML = '';
     if (corr && names.length) {
-      const cellStyle = (v, i, j) => {
+      const cell = (v, i, j) => {
         if (i === j) return 'background:rgba(78,205,196,0.15);color:var(--text);';
-        const abs = Math.abs(v);
-        if (abs > 0.9) return 'background:rgba(224,92,92,0.45);color:#fff;font-weight:600;';
-        if (abs > 0.7) return 'background:rgba(224,92,92,0.20);color:var(--text);';
-        return 'background:transparent;color:var(--text-muted);';
+        const a = Math.abs(v);
+        if (a > 0.9) return 'background:rgba(224,92,92,0.45);color:#fff;font-weight:600;';
+        if (a > 0.7) return 'background:rgba(224,92,92,0.20);color:var(--text);';
+        return 'color:var(--text-muted);';
       };
       corrHTML = `
         <div style="margin-top:16px;">
-          <div style="font-size:12px;font-weight:600;margin-bottom:6px;">Parameter Correlation Matrix
-            <span style="font-weight:400;color:var(--text-muted);"> — red = |r|&gt;0.9 (degenerate)</span>
+          <div style="font-size:12px;font-weight:600;margin-bottom:6px;">
+            Parameter Correlation Matrix
+            <span style="font-weight:400;color:var(--text-muted);"> — red = |r| &gt; 0.9 (degenerate pair)</span>
           </div>
           <div style="overflow-x:auto;">
             <table style="border-collapse:collapse;font-size:11px;">
-              <thead>
-                <tr>
-                  <th style="padding:4px 8px;"></th>
-                  ${names.map(n => `<th style="padding:4px 8px;color:var(--text-muted);font-weight:600;white-space:nowrap;">${n}</th>`).join('')}
-                </tr>
-              </thead>
+              <thead><tr>
+                <th style="padding:4px 8px;"></th>
+                ${names.map(n => `<th style="padding:4px 8px;color:var(--text-muted);font-weight:600;white-space:nowrap;">${n}</th>`).join('')}
+              </tr></thead>
               <tbody>
-                ${corr.map((row, i) => `
-                  <tr>
-                    <td style="padding:4px 8px;color:var(--text-muted);font-weight:600;white-space:nowrap;">${names[i]}</td>
-                    ${row.map((v, j) => `<td style="padding:4px 8px;text-align:right;border-radius:3px;${cellStyle(v, i, j)}">${v.toFixed(3)}</td>`).join('')}
-                  </tr>
-                `).join('')}
+                ${corr.map((row, i) => `<tr>
+                  <td style="padding:4px 8px;color:var(--text-muted);font-weight:600;white-space:nowrap;">${names[i]}</td>
+                  ${row.map((v, j) => `<td style="padding:4px 8px;text-align:right;border-radius:3px;${cell(v,i,j)}">${v.toFixed(3)}</td>`).join('')}
+                </tr>`).join('')}
               </tbody>
             </table>
           </div>
         </div>`;
     } else {
-      corrHTML = `<p style="font-size:12px;color:var(--text-muted);margin-top:12px;">Correlation matrix not available (singular Jacobian or differential evolution without follow-up LM).</p>`;
+      corrHTML = `<p style="font-size:12px;color:var(--text-muted);margin-top:12px;">Correlation matrix not available (singular Jacobian).</p>`;
     }
 
     el.innerHTML = `
@@ -777,22 +890,16 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         <div style="display:flex;gap:32px;flex-wrap:wrap;">
           <div>
             <div style="font-size:12px;color:var(--text-muted);">Reduced χ²</div>
-            <div style="font-size:22px;font-weight:600;${chiClass}">
-              ${chiNu != null ? chiNu.toFixed(3) : '—'}
-            </div>
+            <div style="font-size:22px;font-weight:600;${chiClass}">${chiNu != null ? chiNu.toFixed(3) : '—'}</div>
             ${chiNote ? `<div style="font-size:11px;color:var(--text-muted);">${chiNote}</div>` : ''}
           </div>
           <div>
             <div style="font-size:12px;color:var(--text-muted);">RMSE</div>
-            <div style="font-size:22px;font-weight:600;color:var(--text);">
-              ${rmse != null ? rmse.toExponential(3) + ' Ω' : '—'}
-            </div>
+            <div style="font-size:22px;font-weight:600;color:var(--text);">${rmse != null ? rmse.toExponential(3) + ' Ω' : '—'}</div>
           </div>
           <div>
             <div style="font-size:12px;color:var(--text-muted);">AIC / BIC</div>
-            <div style="font-size:16px;font-weight:600;color:var(--text);">
-              ${result.aic != null ? result.aic.toFixed(1) : '—'} / ${result.bic != null ? result.bic.toFixed(1) : '—'}
-            </div>
+            <div style="font-size:16px;font-weight:600;color:var(--text);">${result.aic != null ? result.aic.toFixed(1) : '—'} / ${result.bic != null ? result.bic.toFixed(1) : '—'}</div>
           </div>
         </div>
         ${corrHTML}
@@ -805,26 +912,14 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       el.innerHTML = '<p style="color:var(--text-muted);padding:16px 0;">No variant data available.</p>';
       return;
     }
+    const criterion = ((getState().optimizeConfig?.criterion) ?? 'AIC').toLowerCase();
+    const succV     = variants.filter(v => v.success && v[criterion] != null);
+    const bestScore = succV.length ? Math.min(...succV.map(v => v[criterion])) : null;
+    const bestAic   = Math.min(...variants.filter(v => v.success && v.aic != null).map(v => v.aic));
+    const bestBic   = Math.min(...variants.filter(v => v.success && v.bic != null).map(v => v.bic));
 
-    const oc = getState().optimizeConfig ?? {};
-    const criterion = (oc.criterion ?? 'AIC').toLowerCase();
-
-    const successVariants = variants.filter(v => v.success && v[criterion] != null);
-    const bestScore = successVariants.length ? Math.min(...successVariants.map(v => v[criterion])) : null;
-
-    const infoId = 'variants-info-popup';
     el.innerHTML = `
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;position:relative;">
-        <span style="font-size:12px;color:var(--text-muted);">Winner = 0. All others show how much worse (ΔAIC / ΔBIC). ★ marks the selected circuit.</span>
-        <button id="variants-info-btn" style="background:none;border:1px solid var(--border);border-radius:50%;width:18px;height:18px;font-size:11px;color:var(--text-muted);cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;">ⓘ</button>
-        <div id="${infoId}" style="display:none;position:absolute;left:0;top:24px;z-index:10;width:340px;padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12px;line-height:1.6;color:var(--text);box-shadow:0 4px 16px rgba(0,0,0,.3);">
-          <div style="font-weight:600;margin-bottom:6px;">How to read ΔAIC / ΔBIC</div>
-          <p style="margin:0 0 6px;">The winning circuit is always <strong>0</strong>. Every other circuit shows how much worse it is relative to the winner — so +4 means "4 points worse than the best."</p>
-          <p style="margin:0 0 6px;"><strong>AIC</strong> (Akaike) and <strong>BIC</strong> (Bayesian) both reward a better fit but penalise circuits with more free parameters, so a 3-RC circuit doesn't automatically win just because it fits slightly better.</p>
-          <p style="margin:0;"><strong>BIC</strong> penalises extra parameters more heavily, so it tends to select simpler circuits. A common rule of thumb: ΔAIC &lt; 2 means the two circuits are essentially equivalent; ΔAIC &gt; 10 means the winner is strongly preferred.</p>
-        </div>
-      </div>
-      <div style="overflow-x:auto;overflow-y:auto;max-height:260px;">
+      <div style="overflow-x:auto;overflow-y:auto;max-height:280px;">
         <table style="width:100%;border-collapse:collapse;font-size:12px;">
           <thead>
             <tr style="position:sticky;top:0;background:var(--surface);">
@@ -837,73 +932,25 @@ export function FittingRunnerView(container, { navigate, showToast }) {
             </tr>
           </thead>
           <tbody>
-            ${(() => {
-              const bestAic = Math.min(...variants.filter(v => v.success && v.aic != null).map(v => v.aic));
-              const bestBic = Math.min(...variants.filter(v => v.success && v.bic != null).map(v => v.bic));
-              return variants.map(v => {
-                const isWinner = v.success && bestScore != null && v[criterion] === bestScore;
-                const bg      = isWinner ? 'background:rgba(100,220,150,0.07);' : '';
-                const opacity = v.success ? '' : 'opacity:0.45;';
-                const resText = v.residual != null ? `${(v.residual * 100).toFixed(2)}%` : (v.error ?? '—');
-                const dAic = v.aic != null && isFinite(bestAic) ? `+${(v.aic - bestAic).toFixed(1)}` : '—';
-                const dBic = v.bic != null && isFinite(bestBic) ? `+${(v.bic - bestBic).toFixed(1)}` : '—';
-                return `<tr style="${bg}${opacity}">
-                  <td style="padding:4px 10px;font-family:monospace;font-size:11px;color:var(--accent);">${v.circuit_string}</td>
-                  <td style="text-align:right;padding:4px 8px;">${v.n_params}</td>
-                  <td style="text-align:right;padding:4px 8px;">${resText}</td>
-                  <td style="text-align:right;padding:4px 8px;">${isWinner ? '0' : dAic}</td>
-                  <td style="text-align:right;padding:4px 8px;">${isWinner ? '0' : dBic}</td>
-                  <td style="text-align:center;padding:4px 8px;color:#64dc96;font-size:14px;">${isWinner ? '★' : ''}</td>
-                </tr>`;
-              }).join('');
-            })()}
+            ${variants.map(v => {
+              const isWinner = v.success && bestScore != null && v[criterion] === bestScore;
+              const bg       = isWinner ? 'background:rgba(100,220,150,0.07);' : '';
+              const opacity  = v.success ? '' : 'opacity:0.45;';
+              const resText  = v.residual != null ? `${(v.residual * 100).toFixed(2)}%` : (v.error ?? '—');
+              const dAic     = v.aic != null && isFinite(bestAic) ? `+${(v.aic - bestAic).toFixed(1)}` : '—';
+              const dBic     = v.bic != null && isFinite(bestBic) ? `+${(v.bic - bestBic).toFixed(1)}` : '—';
+              return `<tr style="${bg}${opacity}">
+                <td style="padding:4px 10px;font-family:monospace;font-size:11px;color:var(--accent);">${v.circuit_string}</td>
+                <td style="text-align:right;padding:4px 8px;">${v.n_params}</td>
+                <td style="text-align:right;padding:4px 8px;">${resText}</td>
+                <td style="text-align:right;padding:4px 8px;">${isWinner ? '0' : dAic}</td>
+                <td style="text-align:right;padding:4px 8px;">${isWinner ? '0' : dBic}</td>
+                <td style="text-align:center;padding:4px 8px;color:#64dc96;font-size:14px;">${isWinner ? '★' : ''}</td>
+              </tr>`;
+            }).join('')}
           </tbody>
         </table>
       </div>`;
-
-    const infoBtn   = el.querySelector('#variants-info-btn');
-    const infoPopup = el.querySelector(`#${infoId}`);
-    infoBtn.addEventListener('click', e => {
-      e.stopPropagation();
-      infoPopup.style.display = infoPopup.style.display === 'none' ? 'block' : 'none';
-    });
-    document.addEventListener('click', function closeInfo() {
-      infoPopup.style.display = 'none';
-      document.removeEventListener('click', closeInfo);
-    }, { once: true });
-  }
-
-  function plotNyquist(result, el) {
-    if (!el || typeof Plotly === 'undefined') return;
-
-    const traces = [];
-    if (result.z_real_data?.length) {
-      traces.push({
-        x: result.z_real_data,
-        y: result.z_imag_data.map(v => -v),
-        mode: 'markers', type: 'scatter', name: 'Data',
-        marker: { color: '#8892b0', size: 5 },
-      });
-    }
-    if (result.success && result.z_real_fit?.length) {
-      traces.push({
-        x: result.z_real_fit,
-        y: result.z_imag_fit.map(v => -v),
-        mode: 'lines', type: 'scatter', name: 'Fit',
-        line: { color: 'var(--accent)', width: 2 },
-      });
-    }
-
-    Plotly.newPlot(el, traces, {
-      paper_bgcolor: 'transparent',
-      plot_bgcolor:  'transparent',
-      margin: { t: 8, r: 16, b: 48, l: 64 },
-      font:   { color: '#8892b0', size: 11 },
-      xaxis:  { title: "Z' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: false },
-      yaxis:  { title: "-Z'' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: false, scaleanchor: 'x', scaleratio: 1 },
-      legend: { x: 0.7, y: 0.95, font: { size: 10 } },
-      showlegend: true,
-    }, { displayModeBar: false, responsive: true });
   }
 
   return {

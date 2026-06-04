@@ -140,9 +140,11 @@ class KKResult(BaseModel):
     M: Optional[int] = None          # number of RC elements used
     mu: Optional[float] = None       # over/under-fit metric
     frequencies: List[float] = []
-    res_real: List[float] = []       # normalised real residuals
-    res_imag: List[float] = []       # normalised imag residuals
-    residual_magnitude: List[float] = []  # |res_real² + res_imag²|^0.5
+    z_real: List[float] = []         # measured Z' (for Nyquist coloring by compliance)
+    z_imag: List[float] = []         # measured Z''
+    res_real: List[float] = []       # normalised real residuals (÷|Z|)
+    res_imag: List[float] = []       # normalised imag residuals (÷|Z|)
+    residual_magnitude: List[float] = []  # sqrt(res_real² + res_imag²)
     flagged_indices: List[int] = []  # indices where residual > threshold
-    freq_min_suggest: Optional[float] = None  # suggested lower freq cutoff
-    freq_max_suggest: Optional[float] = None  # suggested upper freq cutoff
+    freq_min_suggest: Optional[float] = None  # suggested lower freq cutoff (Hz)
+    freq_max_suggest: Optional[float] = None  # suggested upper freq cutoff (Hz)

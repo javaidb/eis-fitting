@@ -609,6 +609,17 @@ select option { background: var(--surface2); }
 .fit-tile.good:hover  { background: rgba(76,175,125,0.08); transform: translateY(-1px); }
 .fit-tile.poor:hover  { background: rgba(224,92,92,0.08);  transform: translateY(-1px); }
 .fit-tile.failed:hover { background: rgba(224,92,92,0.05); transform: translateY(-1px); }
+
+/* KK validation tile states (teal/amber/red — distinct from fit green) */
+.fit-tile.kk-ok   { border-color: var(--accent); cursor: pointer; }
+.fit-tile.kk-warn { border-color: #e8a838;        cursor: pointer; }
+.fit-tile.kk-fail { border-color: var(--danger);  cursor: pointer; opacity: 0.75; }
+.fit-tile.kk-ok:hover   { background: rgba(78,205,196,0.08); transform: translateY(-1px); }
+.fit-tile.kk-warn:hover { background: rgba(232,168,56,0.08); transform: translateY(-1px); }
+.fit-tile.kk-fail:hover { background: rgba(224,92,92,0.05);  transform: translateY(-1px); }
+.fit-tile.kk-ok   .fit-tile-pct { color: var(--accent); }
+.fit-tile.kk-warn .fit-tile-pct { color: #e8a838; }
+.fit-tile.kk-fail .fit-tile-pct { color: var(--danger); }
 .fit-tile-name {
   font-size: 10px;
   color: var(--text-muted);
@@ -865,28 +876,6 @@ select option { background: var(--surface2); }
 }
 .empty-state-icon { font-size: 36px; opacity: 0.4; }
 
-/* KK validation panel */
-.kk-panel {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  margin-bottom: 16px;
-  overflow: hidden;
-}
-.kk-panel-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 14px;
-  background: var(--surface);
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-muted);
-  cursor: default;
-}
-.kk-panel-body {
-  padding: 8px 14px 12px;
-  background: var(--bg);
-}
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }

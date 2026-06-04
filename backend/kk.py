@@ -43,6 +43,8 @@ def run_kk_single(
         M=int(M),
         mu=float(mu),
         frequencies=frequencies.tolist(),
+        z_real=Z.real.tolist(),
+        z_imag=Z.imag.tolist(),
         res_real=res_real.tolist(),
         res_imag=res_imag.tolist(),
         residual_magnitude=residual_mag.tolist(),
