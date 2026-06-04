@@ -1,4 +1,5 @@
 import { getState, setState } from '../state.js';
+import { buildFilename } from '../main.js';
 
 export function TrendsView(container, { navigate, showToast }) {
 
@@ -444,7 +445,7 @@ export function TrendsView(container, { navigate, showToast }) {
       const blob = new Blob([csv], { type: 'text/csv' });
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement('a');
-      a.href = url; a.download = 'eis_results.csv';
+      a.href = url; a.download = buildFilename(getState().folderPath, 'csv');
       a.click();
       URL.revokeObjectURL(url);
     }
