@@ -18,9 +18,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
 
   function bidFromFile(f) {
     const parts = (f.path || '').replace(/\\/g, '/').split('/');
-    const parent = parts.length >= 2 ? parts[parts.length - 2] : '';
-    const m = parent.match(/(\d+)$/);
-    return m ? m[1] : null;
+    return parts.length >= 2 ? parts[parts.length - 2] : null;
   }
 
   // Build per-battery column sets from files.
@@ -33,7 +31,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
         f.columns.forEach(c => map[bid].add(c));
       }
     }
-    const ids = Object.keys(map).sort((a, b) => parseInt(a) - parseInt(b));
+    const ids = Object.keys(map).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     const cols = {};
     ids.forEach(bid => { cols[bid] = [...map[bid]].sort(); });
     return { ids, cols };
@@ -75,7 +73,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
         ${_batteryIds.map(bid => {
           const bidCols = _colsByBattery[bid] || _allCols;
           return `
-            <span style="font-size:12px;color:var(--text-muted);white-space:nowrap;">Battery ${bid}</span>
+            <span style="font-size:12px;color:var(--text-muted);white-space:nowrap;">${bid}</span>
             ${colSelectHtml('per-battery-col-select', perBatteryCols[bid] || '', bidCols,
               'font-size:12px;padding:3px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);',
             )} `
