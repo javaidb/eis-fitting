@@ -64,6 +64,16 @@ document.getElementById('step-nav').addEventListener('click', e => {
   navigate(parseInt(btn.dataset.step, 10));
 });
 
+// ── Filename helper ──────────────────────────────────────────────
+export function buildFilename(folderPath, ext) {
+  const folder = folderPath
+    ? folderPath.replace(/[/\\]+$/, '').split(/[/\\]/).pop()
+    : '';
+  const date = new Date().toISOString().slice(0, 10);
+  const base = folder ? `${folder}_${date}` : `eis_${date}`;
+  return `${base}.${ext}`;
+}
+
 // ── Project save / load ─────────────────────────────────────────
 function saveProject() {
   const s = getState();
@@ -79,6 +89,8 @@ function saveProject() {
     fitResults:         s.fitResults,
     fitCacheKey:        s.fitCacheKey,
     fitTimeout:         s.fitTimeout,
+    fitWeightByModulus: s.fitWeightByModulus ?? true,
+    fitSolver:          s.fitSolver ?? 'lm',
     drtLambda:          s.drtLambda,
     maxStep:            s.maxStep,
   };
@@ -86,7 +98,7 @@ function saveProject() {
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href     = url;
-  a.download = 'eis-project.json';
+  a.download = buildFilename(s.folderPath, 'json');
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -108,6 +120,8 @@ function loadProject(file) {
         fitResults:         proj.fitResults         ?? [],
         fitCacheKey:        proj.fitCacheKey        ?? null,
         fitTimeout:         proj.fitTimeout         ?? 60,
+        fitWeightByModulus: proj.fitWeightByModulus ?? true,
+        fitSolver:          proj.fitSolver          ?? 'lm',
         drtLambda:          proj.drtLambda          ?? 1e-3,
         maxStep:            proj.maxStep            ?? 1,
         step:               1,

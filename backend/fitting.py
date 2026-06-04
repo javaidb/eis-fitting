@@ -6,6 +6,7 @@ from typing import AsyncGenerator, Dict, List, Optional, Union
 
 import numpy as np
 from numpy.random import default_rng
+from scipy.optimize import curve_fit, differential_evolution as _diff_ev
 from impedance.models.circuits import CustomCircuit
 
 from .file_handler import load_eis_data
@@ -140,11 +141,7 @@ def _sample_initial_guess(
     uppers: List[float],
     rng: np.random.Generator,
 ) -> List[float]:
-    """Log-uniform sample within [lower, upper] for each parameter.
-
-    Falls back gracefully when bounds are degenerate (lower == upper, or upper
-    is infinite — in that case perturbs the initial value by a random factor).
-    """
+    """Log-uniform sample within [lower, upper] for each parameter."""
     guess = []
     for i0, lo, hi in zip(initials, lowers, uppers):
         if lo == hi:
@@ -152,12 +149,10 @@ def _sample_initial_guess(
             continue
         lo_pos = max(lo, 1e-30)
         if np.isinf(hi):
-            # No upper bound: perturb initial by ×[0.1, 10] in log space
             center = max(i0, lo_pos)
             factor = 10 ** rng.uniform(-1, 1)
             guess.append(float(np.clip(center * factor, lo_pos, None)))
         else:
-            # Both bounds finite: log-uniform sample
             log_lo = np.log10(max(lo_pos, hi * 1e-10))
             log_hi = np.log10(max(hi, lo_pos * 10))
             guess.append(float(10 ** rng.uniform(log_lo, log_hi)))
@@ -174,6 +169,162 @@ def _compute_aic_bic(Z: np.ndarray, Z_fit: np.ndarray, k: int) -> tuple[float, f
     return float(ll + 2 * k), float(ll + k * np.log(n))
 
 
+# ── scipy-based fitting primitives ───────────────────────────────────────────
+
+def _make_model_func(circuit_string: str, frequencies: np.ndarray):
+    """Return a scipy-compatible model function and a fresh CustomCircuit instance."""
+    n_params = count_circuit_params(circuit_string)
+    c = CustomCircuit(circuit=circuit_string, initial_guess=[1.0] * n_params)
+    x_dummy = np.zeros(2 * len(frequencies))
+
+    def model_func(x, *params):
+        c.parameters_ = np.array(params)
+        Z_pred = c.predict(frequencies)
+        return np.concatenate([Z_pred.real, Z_pred.imag])
+
+    return model_func, c, x_dummy
+
+
+def _do_lm_fit(
+    circuit_string: str,
+    initials: List[float],
+    lowers: List[float],
+    uppers: List[float],
+    frequencies: np.ndarray,
+    Z: np.ndarray,
+    weight_by_modulus: bool = True,
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+    """Fit circuit via scipy TRF (bounded LM). Returns (popt, pcov, Z_fit).
+
+    pcov is the full parameter covariance matrix; its diagonal gives 1σ errors.
+    """
+    model_func, c, x_dummy = _make_model_func(circuit_string, frequencies)
+    Z_target = np.concatenate([Z.real, Z.imag])
+
+    sigma = None
+    if weight_by_modulus:
+        mod = np.maximum(np.abs(Z), 1e-30)
+        sigma = np.concatenate([mod, mod])
+
+    uppers_safe = [float('inf') if np.isinf(u) else u for u in uppers]
+
+    popt, pcov = curve_fit(
+        model_func, x_dummy, Z_target,
+        p0=initials,
+        bounds=(lowers, uppers_safe),
+        sigma=sigma,
+        absolute_sigma=(sigma is not None),
+        method='trf',
+        max_nfev=10000,
+    )
+
+    # A rank-deficient Jacobian yields inf in pcov → treat as unavailable.
+    if np.any(~np.isfinite(pcov)):
+        pcov = None
+
+    c.parameters_ = popt
+    return popt, pcov, c.predict(frequencies)
+
+
+def _do_diff_ev_fit(
+    circuit_string: str,
+    initials: List[float],
+    lowers: List[float],
+    uppers: List[float],
+    frequencies: np.ndarray,
+    Z: np.ndarray,
+    weight_by_modulus: bool = True,
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+    """Fit circuit via differential evolution. Returns (popt, pcov, Z_fit).
+
+    DE handles multi-modal landscapes better than LM. pcov is estimated via a
+    follow-up TRF fit starting from the DE solution.
+    """
+    model_func, c, _ = _make_model_func(circuit_string, frequencies)
+    mod = np.maximum(np.abs(Z), 1e-30) if weight_by_modulus else None
+
+    def objective(params: np.ndarray) -> float:
+        try:
+            c.parameters_ = params
+            Z_pred = c.predict(frequencies)
+            res_r = Z.real - Z_pred.real
+            res_i = Z.imag - Z_pred.imag
+            if weight_by_modulus:
+                return float(np.sum((res_r / mod) ** 2 + (res_i / mod) ** 2))
+            return float(np.sum(res_r ** 2 + res_i ** 2))
+        except Exception:
+            return 1e30
+
+    # DE requires finite bounds; fall back to initial-value-based ranges for unbounded params.
+    bounds_de = []
+    for lo, hi, i0 in zip(lowers, uppers, initials):
+        lo_eff = lo if np.isfinite(lo) else max(abs(i0) * 1e-6, 1e-30)
+        hi_eff = hi if np.isfinite(hi) else max(abs(i0) * 1e4, 1e4)
+        if lo_eff >= hi_eff:
+            hi_eff = lo_eff * 1e4 + 1e-20
+        bounds_de.append((lo_eff, hi_eff))
+
+    de_result = _diff_ev(
+        objective, bounds_de,
+        seed=42, maxiter=1000, tol=1e-7,
+        polish=True,  # final LM polish at DE minimum
+        workers=1,
+    )
+    popt = de_result.x
+
+    # Estimate covariance via TRF from the DE optimum.
+    pcov = None
+    try:
+        _, pcov, _ = _do_lm_fit(circuit_string, popt.tolist(), lowers, uppers,
+                                  frequencies, Z, weight_by_modulus)
+    except Exception:
+        pass
+
+    c.parameters_ = popt
+    return popt, pcov, c.predict(frequencies)
+
+
+# ── post-fit statistics ───────────────────────────────────────────────────────
+
+def _compute_chi_sq_nu(
+    Z: np.ndarray, Z_fit: np.ndarray, k: int, weight_by_modulus: bool
+) -> float | None:
+    """Reduced chi-squared χ²/(N−p).  N = 2·len(Z) (real+imag), p = k."""
+    N = 2 * len(Z)
+    dof = N - k
+    if dof <= 0:
+        return None
+    if weight_by_modulus:
+        mod = np.maximum(np.abs(Z), 1e-30)
+        chi_sq = float(np.sum(((Z.real - Z_fit.real) / mod) ** 2 +
+                              ((Z.imag - Z_fit.imag) / mod) ** 2))
+    else:
+        chi_sq = float(np.sum((Z.real - Z_fit.real) ** 2 + (Z.imag - Z_fit.imag) ** 2))
+    return chi_sq / dof
+
+
+def _compute_rmse(Z: np.ndarray, Z_fit: np.ndarray) -> float:
+    """RMSE of the complex impedance: sqrt(mean(|Z_meas - Z_calc|²))."""
+    return float(np.sqrt(np.mean(np.abs(Z - Z_fit) ** 2)))
+
+
+def _compute_correlation(pcov: np.ndarray | None) -> List[List[float]] | None:
+    """Convert covariance matrix to correlation matrix. Returns None if pcov is None."""
+    if pcov is None:
+        return None
+    try:
+        diag = np.sqrt(np.diag(pcov))
+        diag_safe = np.where(diag < 1e-30, 1e-30, diag)
+        corr = pcov / np.outer(diag_safe, diag_safe)
+        # Clip to [-1, 1] to correct any floating-point overshoot.
+        corr = np.clip(corr, -1.0, 1.0)
+        return corr.tolist()
+    except Exception:
+        return None
+
+
+# ── main fitting logic ────────────────────────────────────────────────────────
+
 def fit_single(
     frequencies: np.ndarray,
     Z: np.ndarray,
@@ -183,6 +334,8 @@ def fit_single(
     filepath: str,
     optimize_config: OptimizeConfig | None = None,
     column_map: ColumnMap | None = None,
+    weight_by_modulus: bool = True,
+    solver: str = 'lm',
 ) -> FitResult:
     allowed_char = (set(column_map.characterization.keys()) if column_map else set()) | {'identifier', 'battery_id'}
     clean_char = {k: v for k, v in char_values.items() if k in allowed_char}
@@ -214,38 +367,55 @@ def fit_single(
             initials, lowers, uppers = _resolve_bounds(param_names, name_lookup)
             k = len(param_names)
 
-            # Multi-start: try n_restarts initialisations, keep the lowest-RSS fit.
-            best_rss = float('inf')
-            best_parameters: list[float] = []
-            best_conf_raw: list[float] | None = None
+            best_obj = float('inf')
+            best_popt: np.ndarray | None = None
+            best_pcov: np.ndarray | None = None
             Z_fit: np.ndarray = np.zeros_like(Z)
 
-            for restart in range(n_restarts):
-                guess = initials if restart == 0 else _sample_initial_guess(initials, lowers, uppers, rng)
-                try:
-                    c = CustomCircuit(circuit=variant_circuit, initial_guess=guess)
-                    c.fit(frequencies, Z, bounds=(lowers, uppers))
-                    Z_try = c.predict(frequencies)
-                    rss = float(np.sum((Z.real - Z_try.real) ** 2 + (Z.imag - Z_try.imag) ** 2))
-                    if rss < best_rss:
-                        best_rss = rss
-                        best_parameters = c.parameters_.tolist()
-                        best_conf_raw = c.conf_.tolist() if c.conf_ is not None else None
-                        Z_fit = Z_try
-                except Exception:
-                    continue
+            if solver == 'diff_ev':
+                # Single DE run (already global — no multi-start needed)
+                popt, pcov, Z_try = _do_diff_ev_fit(
+                    variant_circuit, initials, lowers, uppers,
+                    frequencies, Z, weight_by_modulus,
+                )
+                best_popt, best_pcov, Z_fit = popt, pcov, Z_try
 
-            if not best_parameters:
+            else:
+                # Multi-start LM
+                for restart in range(n_restarts):
+                    guess = initials if restart == 0 else _sample_initial_guess(initials, lowers, uppers, rng)
+                    try:
+                        popt, pcov, Z_try = _do_lm_fit(
+                            variant_circuit, guess, lowers, uppers,
+                            frequencies, Z, weight_by_modulus,
+                        )
+                        # Compare by modulus-weighted objective so restarts are fairly ranked.
+                        mod = np.maximum(np.abs(Z), 1e-30)
+                        obj = float(np.sum(((Z.real - Z_try.real) / mod) ** 2 +
+                                          ((Z.imag - Z_try.imag) / mod) ** 2))
+                        if obj < best_obj:
+                            best_obj = obj
+                            best_popt = popt
+                            best_pcov = pcov
+                            Z_fit = Z_try
+                    except Exception:
+                        continue
+
+            if best_popt is None:
                 raise RuntimeError("all restarts failed")
 
             residual = float(np.mean(np.abs(Z - Z_fit) / (np.abs(Z) + 1e-12)))
             aic, bic = _compute_aic_bic(Z, Z_fit, k)
+            chi_sq_nu = _compute_chi_sq_nu(Z, Z_fit, k, weight_by_modulus)
+            rmse = _compute_rmse(Z, Z_fit)
+            correlation = _compute_correlation(best_pcov)
             score = aic if criterion == 'AIC' else bic
 
-            params = dict(zip(param_names, best_parameters))
+            params = dict(zip(param_names, best_popt.tolist()))
             conf: Dict[str, float] = {}
-            if best_conf_raw is not None:
-                conf = dict(zip(param_names, best_conf_raw))
+            if best_pcov is not None:
+                diag_errs = np.sqrt(np.diag(best_pcov))
+                conf = dict(zip(param_names, diag_errs.tolist()))
 
             variants_tried.append(VariantResult(
                 circuit_string=variant_circuit,
@@ -263,6 +433,7 @@ def fit_single(
                     path=filepath,
                     success=True,
                     parameters=params,
+                    param_names=param_names,
                     confidence=conf,
                     frequencies=frequencies.tolist(),
                     z_real_fit=Z_fit.real.tolist(),
@@ -271,6 +442,11 @@ def fit_single(
                     z_imag_data=Z.imag.tolist(),
                     characterization=clean_char,
                     residual=residual,
+                    rmse=rmse,
+                    chi_sq_nu=chi_sq_nu,
+                    aic=aic,
+                    bic=bic,
+                    correlation=correlation,
                     circuit_used=variant_circuit,
                 )
 
@@ -336,6 +512,8 @@ async def fit_batch_stream(request: FitRequest) -> AsyncGenerator[str, None]:
                     file_info.path,
                     request.optimize_config,
                     request.column_map,
+                    request.weight_by_modulus,
+                    request.solver,
                 ),
                 timeout=request.fit_timeout,
             )

@@ -4,9 +4,10 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.drt import drt_batch_stream
-from backend.file_handler import scan_folder
+from backend.file_handler import characterize_files, scan_folder
 from backend.fitting import fit_batch_stream, get_param_names
-from backend.models import DRTRequest, FitRequest, FreqRangeRequest, ParseCircuitRequest, ScanFolderRequest
+from backend.kk import kk_batch_stream
+from backend.models import CharacterizeRequest, DRTRequest, FitRequest, FreqRangeRequest, KKRequest, ParseCircuitRequest, ScanFolderRequest
 
 app = FastAPI(title="EIS Fitting")
 
@@ -113,6 +114,14 @@ async def api_freq_range(request: FreqRangeRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/characterize")
+async def api_characterize(request: CharacterizeRequest):
+    try:
+        return characterize_files(request.files, request.column_map)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/fit")
 async def api_fit(request: FitRequest):
     async def stream():
@@ -130,6 +139,19 @@ async def api_fit(request: FitRequest):
 async def api_drt(request: DRTRequest):
     async def stream():
         async for chunk in drt_batch_stream(request):
+            yield chunk
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/kk")
+async def api_kk(request: KKRequest):
+    async def stream():
+        async for chunk in kk_batch_stream(request):
             yield chunk
 
     return StreamingResponse(

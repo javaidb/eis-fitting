@@ -1,5 +1,5 @@
 import { getState, setState } from '../state.js';
-import { streamFitting } from '../api.js';
+import { characterizeFiles, streamFitting, streamKK } from '../api.js';
 
 const GOOD_THRESHOLD = 0.05;
 
@@ -40,52 +40,74 @@ function configKey(state) {
     optimize: state.optimizeConfig ?? { enabled: false },
     freqMin:  state.fitFreqMin ?? null,
     freqMax:  state.fitFreqMax ?? null,
+    weight:   state.fitWeightByModulus ?? true,
+    solver:   state.fitSolver ?? 'lm',
   });
 }
 
-function batteryIdFromPath(path) {
+function parentFolder(path) {
   const parts = (path || '').replace(/\\/g, '/').split('/');
-  const parent = parts.length >= 2 ? parts[parts.length - 2] : '';
-  const m = parent.match(/(\d+)$/);
-  return m ? parseInt(m[1], 10) : null;
+  return parts.length >= 2 ? parts[parts.length - 2] : 'Files';
 }
 
 function groupFiles(files) {
   const groups = new Map();
   for (const f of files) {
-    const bid = batteryIdFromPath(f.path);
-    const parts = (f.path || '').replace(/\\/g, '/').split('/');
-    const parent = parts.length >= 2 ? parts[parts.length - 2] : 'Files';
-    const key = bid != null ? `battery_${bid}` : parent;
-    const label = bid != null ? `Battery ${bid}` : parent;
-    if (!groups.has(key)) groups.set(key, { label, files: [] });
-    groups.get(key).files.push(f);
+    const folder = parentFolder(f.path);
+    if (!groups.has(folder)) groups.set(folder, { label: folder, files: [] });
+    groups.get(folder).files.push(f);
   }
   return groups;
 }
 
-// Stable, unique DOM id derived from a file's path (unique across batteries even
-// when filenames repeat, e.g. battery_01/EIS.csv and battery_02/EIS.csv).
 function pathToSafeId(path) {
   return (path || '').replace(/[^a-zA-Z0-9]/g, '_');
 }
 
 export function FittingRunnerView(container, { navigate, showToast }) {
-  // Keyed by file path (unique), not filename (which can repeat across batteries).
   const resultMap = new Map();
+  const charMap   = new Map();
+  const kkMap     = new Map();  // path → KKResult
+
+  let binByField = '';
+  let sortByBest = false;
+  let kkExpanded = false;
+
+  function getCharFields() {
+    const fields = new Set();
+    for (const r of resultMap.values()) {
+      for (const k of Object.keys(r.characterization || {})) fields.add(k);
+    }
+    for (const c of charMap.values()) {
+      for (const k of Object.keys(c)) fields.add(k);
+    }
+    if (!fields.size) {
+      for (const k of Object.keys(getState().charUnits || {})) fields.add(k);
+    }
+    return [...fields].sort();
+  }
+
+  function rebuildGrid() {
+    const tileRoot = container.querySelector('#fit-tile-root');
+    if (!tileRoot) return;
+    tileRoot.innerHTML = buildTileGrid(getState().files || [], resultMap);
+    wireTileClicks();
+  }
 
   function render() {
     const state = getState();
     const ready = state.files?.length && state.columnMap && state.circuitConfig;
+    const charFields = getCharFields();
     const cached = ready && state.fitResults?.length && state.fitCacheKey === configKey(state);
 
-    // Correlate saved results to files by position — results are stored in the same
-    // order as state.files, so fitResults[i] belongs to files[i].
     resultMap.clear();
     const files = state.files || [];
     (state.fitResults || []).forEach((r, i) => {
       if (files[i]) resultMap.set(files[i].path, r);
     });
+
+    const weightChecked = state.fitWeightByModulus ?? true;
+    const solver        = state.fitSolver ?? 'lm';
 
     container.innerHTML = `
       <div class="section-header">Fit</div>
@@ -116,6 +138,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       <div class="step-actions" style="margin-bottom:20px;">
         <button class="btn btn-secondary" id="back-btn">← Back</button>
         <div class="spacer"></div>
+
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
           Timeout
           <input id="fit-timeout" type="number" min="5" max="600" step="5"
@@ -123,6 +146,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
                  style="width:64px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;text-align:right;">
           s / fit
         </label>
+
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
           Freq
           <input id="freq-min" type="number" min="0" step="any"
@@ -134,9 +158,50 @@ export function FittingRunnerView(container, { navigate, showToast }) {
                  style="width:72px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;text-align:right;">
           Hz
         </label>
-        <button class="btn btn-danger" id="stop-btn" style="display:none;">■ Stop</button>
-        <button class="btn btn-primary" id="run-btn" ${!ready ? 'disabled' : ''}>${cached ? '↺ Re-run Fitting' : '▶ Run Fitting'}</button>
+
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);"
+               title="Modulus weighting (1/|Z|²) — recommended for most EIS data">
+          <input type="checkbox" id="weight-modulus-cb" ${weightChecked ? 'checked' : ''}>
+          Modulus weight
+        </label>
+
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
+          Solver
+          <select id="solver-select" style="padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;">
+            <option value="lm"      ${solver === 'lm'      ? 'selected' : ''}>LM (fast)</option>
+            <option value="diff_ev" ${solver === 'diff_ev' ? 'selected' : ''}>Diff. Evo. (global)</option>
+          </select>
+        </label>
+
+        <button class="btn btn-danger"   id="stop-btn"  style="display:none;">■ Stop</button>
+        <button class="btn btn-primary"  id="run-btn"   ${!ready ? 'disabled' : ''}>${cached ? '↺ Re-run Fitting' : '▶ Run Fitting'}</button>
         <button class="btn btn-secondary" id="next-btn" ${!state.fitResults?.length ? 'disabled' : ''}>View Trends →</button>
+      </div>
+
+      <!-- KK validation panel -->
+      <div class="kk-panel" id="kk-panel">
+        <div class="kk-panel-header" id="kk-panel-header">
+          <span>KK Compliance Check</span>
+          <button class="btn btn-secondary" id="kk-run-btn" style="font-size:12px;padding:3px 10px;" ${!ready ? 'disabled' : ''}>
+            Run KK
+          </button>
+          <span id="kk-summary" style="font-size:12px;color:var(--text-muted);margin-left:8px;"></span>
+          <button id="kk-apply-btn" class="btn btn-secondary" style="display:none;font-size:12px;padding:3px 10px;margin-left:auto;">
+            Apply suggested range
+          </button>
+        </div>
+        <div class="kk-panel-body" id="kk-panel-body" style="display:none;"></div>
+      </div>
+
+      <div class="fit-sort-bar">
+        <span style="font-size:12px;color:var(--text-muted);">Bin by</span>
+        <select id="bin-by-select" style="padding:3px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;">
+          <option value="">— none —</option>
+          ${charFields.map(f => `<option value="${f}" ${f === binByField ? 'selected' : ''}>${f}</option>`).join('')}
+        </select>
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-muted);cursor:pointer;">
+          <input type="checkbox" id="sort-best-cb" ${sortByBest ? 'checked' : ''}> Group by best circuit
+        </label>
       </div>
 
       <div class="fit-tile-root" id="fit-tile-root">
@@ -155,6 +220,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
             <button class="tab-btn active" data-tab="nyquist">Nyquist</button>
             <button class="tab-btn" data-tab="bode">Bode</button>
             <button class="tab-btn" data-tab="residuals">Residuals</button>
+            <button class="tab-btn" data-tab="diagnostics">Diagnostics</button>
           </div>
           <div class="fit-modal-plot" id="fit-modal-plot"></div>
           <div class="params-summary fit-modal-params" id="fit-modal-params"></div>
@@ -172,23 +238,82 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       if (e.target === e.currentTarget) closeModal();
     });
 
+    container.querySelector('#weight-modulus-cb').addEventListener('change', e => {
+      setState({ fitWeightByModulus: e.target.checked });
+    });
+    container.querySelector('#solver-select').addEventListener('change', e => {
+      setState({ fitSolver: e.target.value });
+    });
+
     wireTileClicks();
+
+    container.querySelector('#bin-by-select')?.addEventListener('change', e => {
+      binByField = e.target.value;
+      rebuildGrid();
+    });
+    container.querySelector('#sort-best-cb')?.addEventListener('change', e => {
+      sortByBest = e.target.checked;
+      rebuildGrid();
+    });
+
+    // KK panel wiring
+    container.querySelector('#kk-run-btn')?.addEventListener('click', runKK);
+    container.querySelector('#kk-apply-btn')?.addEventListener('click', applyKKRange);
   }
+
+  // ── Tile grid ──────────────────────────────────────────────────────────────
 
   function buildTileGrid(files, rMap) {
     if (!files.length) return '';
     const groups = groupFiles(files);
-    return [...groups.entries()].map(([, { label, files: gFiles }]) => `
-      <div class="fit-group">
-        <div class="fit-group-header">${label}</div>
-        <div class="fit-tile-row">
-          ${gFiles.map(f => buildTile(f.filename, f.path, rMap.get(f.path))).join('')}
+    return [...groups.entries()].map(([, { label, files: gFiles }]) => {
+      let displayFiles = [...gFiles];
+      if (sortByBest) {
+        displayFiles.sort((a, b) => {
+          const ca = rMap.get(a.path)?.circuit_used ?? '￿';
+          const cb = rMap.get(b.path)?.circuit_used ?? '￿';
+          return ca.localeCompare(cb);
+        });
+      }
+      if (binByField) {
+        const bins = new Map();
+        for (const f of displayFiles) {
+          const char = rMap.get(f.path)?.characterization ?? charMap.get(f.path) ?? {};
+          const val = String(char[binByField] ?? 'N/A');
+          if (!bins.has(val)) bins.set(val, []);
+          bins.get(val).push(f);
+        }
+        const sortedBins = [...bins.entries()].sort(([a], [b]) => {
+          const na = parseFloat(a), nb = parseFloat(b);
+          return !isNaN(na) && !isNaN(nb) ? na - nb : a.localeCompare(b);
+        });
+        return `
+          <div class="fit-group">
+            <div class="fit-group-header">${label}</div>
+            <div class="fit-subgroup-row">
+              ${sortedBins.map(([val, binFiles]) => `
+                <div class="fit-subgroup">
+                  <div class="fit-subgroup-header">${binByField}: ${val}</div>
+                  <div class="fit-tile-row">
+                    ${binFiles.map(f => buildTile(f.filename, f.path, rMap.get(f.path))).join('')}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `;
+      }
+      return `
+        <div class="fit-group">
+          <div class="fit-group-header">${label}</div>
+          <div class="fit-tile-row">
+            ${displayFiles.map(f => buildTile(f.filename, f.path, rMap.get(f.path))).join('')}
+          </div>
         </div>
-      </div>
-    `).join('');
+      `;
+    }).join('');
   }
 
-  // path is used as the unique tile key (filename repeats across batteries, path never does).
   function buildTile(filename, path, result) {
     const safeId = pathToSafeId(path);
     if (!result) {
@@ -218,18 +343,17 @@ export function FittingRunnerView(container, { navigate, showToast }) {
   function updateTile(result, path) {
     const el = container.querySelector(`#tile-${pathToSafeId(path)}`);
     if (!el) return;
-
     const good = result.success && result.residual != null && result.residual < GOOD_THRESHOLD;
     const cls = result.success ? (good ? 'good' : 'poor') : 'failed';
     const pct = result.residual != null ? `${(result.residual * 100).toFixed(1)}%` : '—';
-
     el.className = `fit-tile ${cls}`;
     el.querySelector('.fit-tile-pct').textContent = result.success ? pct : 'FAILED';
-    // Clone to drop accumulated listeners from any previous run before adding the new one.
     const fresh = el.cloneNode(true);
     fresh.addEventListener('click', () => openModal(result));
     el.replaceWith(fresh);
   }
+
+  // ── Modal ──────────────────────────────────────────────────────────────────
 
   function openModal(result) {
     const modal    = container.querySelector('#fit-modal');
@@ -264,19 +388,19 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       })
       .join(' &nbsp; ');
 
-    // Reset tabs to Nyquist and wire switching. Clone to clear previous result's listeners.
     const tabsEl = container.querySelector('#fit-modal-tabs');
     const freshTabs = tabsEl.cloneNode(true);
     tabsEl.replaceWith(freshTabs);
 
-    // Add or remove the Variants tab depending on whether there are variants to show.
     freshTabs.querySelector('[data-tab="variants"]')?.remove();
     if (result.variants_tried?.length > 1) {
       const vBtn = document.createElement('button');
       vBtn.className = 'tab-btn';
       vBtn.dataset.tab = 'variants';
       vBtn.textContent = `Variants (${result.variants_tried.length})`;
-      freshTabs.appendChild(vBtn);
+      // Insert before Diagnostics tab
+      const diagBtn = freshTabs.querySelector('[data-tab="diagnostics"]');
+      freshTabs.insertBefore(vBtn, diagBtn);
     }
 
     freshTabs.querySelectorAll('.tab-btn').forEach(btn => {
@@ -286,10 +410,11 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         btn.classList.add('active');
         plotEl.innerHTML = '';
         requestAnimationFrame(() => {
-          if (btn.dataset.tab === 'nyquist')        plotNyquist(result, plotEl);
-          else if (btn.dataset.tab === 'bode')      plotBode(result, plotEl);
-          else if (btn.dataset.tab === 'variants')  plotVariants(result, plotEl);
-          else                                      plotResiduals(result, plotEl);
+          if      (btn.dataset.tab === 'nyquist')     plotNyquist(result, plotEl);
+          else if (btn.dataset.tab === 'bode')        plotBode(result, plotEl);
+          else if (btn.dataset.tab === 'variants')    plotVariants(result, plotEl);
+          else if (btn.dataset.tab === 'diagnostics') plotDiagnostics(result, plotEl);
+          else                                        plotResiduals(result, plotEl);
         });
       });
     });
@@ -304,15 +429,13 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     container.querySelector('#fit-modal-plot').innerHTML = '';
   }
 
+  // ── Fitting run ────────────────────────────────────────────────────────────
+
   let _abortCtrl = null;
 
-  function stopFitting() {
-    _abortCtrl?.abort();
-  }
+  function stopFitting() { _abortCtrl?.abort(); }
 
-  function onKeyDown(e) {
-    if (e.key === 'Escape') closeModal();
-  }
+  function onKeyDown(e) { if (e.key === 'Escape') closeModal(); }
 
   async function runFitting() {
     const state = getState();
@@ -326,7 +449,6 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     const progressLabel = container.querySelector('#progress-label');
     const tileRoot      = container.querySelector('#fit-tile-root');
 
-    // Ordered list of file paths matching the order the server will return results.
     const filePaths = state.files.map(f => f.path);
 
     _abortCtrl = new AbortController();
@@ -342,24 +464,32 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     let stopped = false;
     let gotDone = false;
 
-    const timeout  = parseFloat(container.querySelector('#fit-timeout').value) || 60;
-    const freqMinVal = container.querySelector('#freq-min').value.trim();
-    const freqMaxVal = container.querySelector('#freq-max').value.trim();
-    const freqMin  = freqMinVal !== '' ? parseFloat(freqMinVal) : null;
-    const freqMax  = freqMaxVal !== '' ? parseFloat(freqMaxVal) : null;
-    const runCacheKey = configKey({ ...state, fitTimeout: timeout, fitFreqMin: freqMin, fitFreqMax: freqMax });
+    const timeout         = parseFloat(container.querySelector('#fit-timeout').value) || 60;
+    const freqMinVal      = container.querySelector('#freq-min').value.trim();
+    const freqMaxVal      = container.querySelector('#freq-max').value.trim();
+    const freqMin         = freqMinVal !== '' ? parseFloat(freqMinVal) : null;
+    const freqMax         = freqMaxVal !== '' ? parseFloat(freqMaxVal) : null;
+    const weightByModulus = container.querySelector('#weight-modulus-cb').checked;
+    const solver          = container.querySelector('#solver-select').value;
+    const runCacheKey = configKey({
+      ...state, fitTimeout: timeout, fitFreqMin: freqMin, fitFreqMax: freqMax,
+      fitWeightByModulus: weightByModulus, fitSolver: solver,
+    });
 
     try {
-      setState({ fitTimeout: timeout, fitFreqMin: freqMin, fitFreqMax: freqMax });
+      setState({ fitTimeout: timeout, fitFreqMin: freqMin, fitFreqMax: freqMax,
+                 fitWeightByModulus: weightByModulus, fitSolver: solver });
 
       const request = {
-        files:           state.files,
-        column_map:      { ...state.columnMap, decimal_places: state.charDecimalPlaces ?? {} },
-        circuit_config:  state.circuitConfig,
-        fit_timeout:     timeout,
-        optimize_config: state.optimizeConfig ?? { enabled: false },
-        freq_min:        freqMin,
-        freq_max:        freqMax,
+        files:              state.files,
+        column_map:         { ...state.columnMap, decimal_places: state.charDecimalPlaces ?? {} },
+        circuit_config:     state.circuitConfig,
+        fit_timeout:        timeout,
+        optimize_config:    state.optimizeConfig ?? { enabled: false },
+        freq_min:           freqMin,
+        freq_max:           freqMax,
+        weight_by_modulus:  weightByModulus,
+        solver:             solver,
       };
 
       for await (const event of streamFitting(request, _abortCtrl.signal)) {
@@ -369,14 +499,10 @@ export function FittingRunnerView(container, { navigate, showToast }) {
           progressLabel.textContent = `Fitting ${event.file} (${event.index + 1} / ${event.total})`;
         } else if (event.event === 'result') {
           const result = event.data;
-          // results arrive in the same order as filePaths, so index = current length before push
           const path = filePaths[results.length];
           results.push(result);
           resultMap.set(path, result);
           updateTile(result, path);
-          // Yield a paint frame so each tile visually updates before the next result
-          // is processed — without this, a burst of SSE events in one TCP chunk would
-          // be handled entirely in microtasks with no repaint opportunity between them.
           await new Promise(r => requestAnimationFrame(r));
         } else if (event.event === 'done') {
           gotDone = true;
@@ -403,11 +529,128 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         fitCacheKey: completed ? runCacheKey : null,
         maxStep:     Math.max(state.maxStep, 7),
       });
-
-      // Refresh banners/buttons to reflect the latest cache state.
       render();
     }
   }
+
+  // ── KK validation ──────────────────────────────────────────────────────────
+
+  let _kkSuggestMin = null;
+  let _kkSuggestMax = null;
+
+  async function runKK() {
+    const state = getState();
+    if (!state.files?.length || !state.columnMap) return;
+
+    const kkRunBtn  = container.querySelector('#kk-run-btn');
+    const kkSummary = container.querySelector('#kk-summary');
+    const kkBody    = container.querySelector('#kk-panel-body');
+    const kkApply   = container.querySelector('#kk-apply-btn');
+
+    kkRunBtn.disabled = true;
+    kkRunBtn.textContent = 'Running…';
+    kkBody.style.display = 'block';
+    kkBody.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">Running Kramers-Kronig check…</span>';
+    kkMap.clear();
+    _kkSuggestMin = null;
+    _kkSuggestMax = null;
+
+    const freqMinVal = container.querySelector('#freq-min').value.trim();
+    const freqMaxVal = container.querySelector('#freq-max').value.trim();
+
+    const request = {
+      files:       state.files,
+      column_map:  { ...state.columnMap, decimal_places: state.charDecimalPlaces ?? {} },
+      freq_min:    freqMinVal !== '' ? parseFloat(freqMinVal) : null,
+      freq_max:    freqMaxVal !== '' ? parseFloat(freqMaxVal) : null,
+    };
+
+    const filePaths = state.files.map(f => f.path);
+    const kkResults = [];
+
+    try {
+      for await (const event of streamKK(request)) {
+        if (event.event === 'result') {
+          const r = event.data;
+          const path = filePaths[kkResults.length];
+          kkResults.push(r);
+          kkMap.set(path, r);
+        }
+      }
+    } catch (err) {
+      showToast(`KK error: ${err.message}`, 'error');
+    }
+
+    // Summarise
+    const nFailed  = kkResults.filter(r => !r.success).length;
+    const nFlagged = kkResults.filter(r => r.success && r.flagged_indices?.length > 0).length;
+    const nClean   = kkResults.filter(r => r.success && r.flagged_indices?.length === 0).length;
+
+    // Aggregate suggested range (conservative: tightest range across all files)
+    const suggests = kkResults.filter(r => r.success && r.freq_min_suggest != null);
+    if (suggests.length) {
+      _kkSuggestMin = Math.max(...suggests.map(r => r.freq_min_suggest));
+      _kkSuggestMax = Math.min(...suggests.map(r => r.freq_max_suggest));
+    }
+
+    kkSummary.innerHTML = [
+      nClean   ? `<span style="color:var(--success)">${nClean} compliant</span>` : '',
+      nFlagged ? `<span style="color:var(--warning)">${nFlagged} have flagged points</span>` : '',
+      nFailed  ? `<span style="color:var(--danger)">${nFailed} failed</span>` : '',
+    ].filter(Boolean).join(' · ');
+
+    if (_kkSuggestMin != null && _kkSuggestMax != null) {
+      kkSummary.innerHTML += ` · Suggested range: ${_kkSuggestMin.toPrecision(3)}–${_kkSuggestMax.toPrecision(3)} Hz`;
+      kkApply.style.display = '';
+    }
+
+    // Show KK residual plot for first successful result
+    const firstOk = kkResults.find(r => r.success && r.frequencies?.length);
+    kkBody.innerHTML = '';
+    if (firstOk) {
+      const plotDiv = document.createElement('div');
+      plotDiv.style.height = '200px';
+      kkBody.appendChild(plotDiv);
+      renderKKPlot(firstOk, plotDiv);
+    }
+
+    kkRunBtn.disabled = false;
+    kkRunBtn.textContent = 'Re-run KK';
+  }
+
+  function renderKKPlot(kk, el) {
+    if (typeof Plotly === 'undefined' || !kk.frequencies?.length) return;
+    const threshLine = { x: [kk.frequencies[0], kk.frequencies[kk.frequencies.length - 1]],
+                         y: [1, 1], mode: 'lines', name: '1% threshold',
+                         line: { color: '#888', dash: 'dot', width: 1 }, showlegend: false };
+    Plotly.newPlot(el, [
+      { x: kk.frequencies, y: kk.res_real.map(v => Math.abs(v) * 100),
+        mode: 'markers+lines', name: "|Δ Z'|", marker: { color: '#e05c5c', size: 4 },
+        line: { color: '#e05c5c', width: 1 } },
+      { x: kk.frequencies, y: kk.res_imag.map(v => Math.abs(v) * 100),
+        mode: 'markers+lines', name: "|Δ Z''|", marker: { color: '#4a9ade', size: 4 },
+        line: { color: '#4a9ade', width: 1 } },
+      threshLine,
+    ], {
+      paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+      margin: { t: 8, r: 16, b: 40, l: 52 },
+      font:   { color: '#8892b0', size: 10 },
+      xaxis:  { title: 'Frequency (Hz)', type: 'log', color: '#8892b0', gridcolor: '#2d3147' },
+      yaxis:  { title: 'KK residual (%)', color: '#8892b0', gridcolor: '#2d3147', zeroline: true },
+      legend: { x: 0.6, y: 0.95, font: { size: 9 } },
+    }, { displayModeBar: false, responsive: true });
+  }
+
+  function applyKKRange() {
+    if (_kkSuggestMin == null) return;
+    const minEl = container.querySelector('#freq-min');
+    const maxEl = container.querySelector('#freq-max');
+    if (minEl) minEl.value = _kkSuggestMin;
+    if (maxEl) maxEl.value = _kkSuggestMax;
+    showToast('Suggested frequency range applied.', 'success');
+  }
+
+  // ── Plot functions ─────────────────────────────────────────────────────────
 
   function plotBode(result, el) {
     if (!el || typeof Plotly === 'undefined') return;
@@ -468,6 +711,92 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       legend: { x: 0.6, y: 0.95, font: { size: 10 } },
       showlegend: true,
     }, { displayModeBar: false, responsive: true });
+  }
+
+  function plotDiagnostics(result, el) {
+    if (!result.success) {
+      el.innerHTML = '<p style="color:var(--text-muted);padding:16px 0;">No diagnostics — fit failed.</p>';
+      return;
+    }
+
+    const chiNu  = result.chi_sq_nu;
+    const rmse   = result.rmse;
+    const corr   = result.correlation;
+    const names  = result.param_names || Object.keys(result.parameters || {});
+
+    // χ²_ν interpretation
+    let chiClass = '';
+    let chiNote  = '';
+    if (chiNu != null) {
+      if      (chiNu < 0.5)  { chiClass = 'color:var(--accent)';  chiNote = 'possible overfitting'; }
+      else if (chiNu < 2.0)  { chiClass = 'color:var(--success)'; chiNote = 'good fit'; }
+      else if (chiNu < 10.0) { chiClass = 'color:var(--warning)'; chiNote = 'poor fit'; }
+      else                   { chiClass = 'color:var(--danger)';   chiNote = 'very poor fit'; }
+    }
+
+    // Correlation matrix HTML (color-coded)
+    let corrHTML = '';
+    if (corr && names.length) {
+      const cellStyle = (v, i, j) => {
+        if (i === j) return 'background:rgba(78,205,196,0.15);color:var(--text);';
+        const abs = Math.abs(v);
+        if (abs > 0.9) return 'background:rgba(224,92,92,0.45);color:#fff;font-weight:600;';
+        if (abs > 0.7) return 'background:rgba(224,92,92,0.20);color:var(--text);';
+        return 'background:transparent;color:var(--text-muted);';
+      };
+      corrHTML = `
+        <div style="margin-top:16px;">
+          <div style="font-size:12px;font-weight:600;margin-bottom:6px;">Parameter Correlation Matrix
+            <span style="font-weight:400;color:var(--text-muted);"> — red = |r|&gt;0.9 (degenerate)</span>
+          </div>
+          <div style="overflow-x:auto;">
+            <table style="border-collapse:collapse;font-size:11px;">
+              <thead>
+                <tr>
+                  <th style="padding:4px 8px;"></th>
+                  ${names.map(n => `<th style="padding:4px 8px;color:var(--text-muted);font-weight:600;white-space:nowrap;">${n}</th>`).join('')}
+                </tr>
+              </thead>
+              <tbody>
+                ${corr.map((row, i) => `
+                  <tr>
+                    <td style="padding:4px 8px;color:var(--text-muted);font-weight:600;white-space:nowrap;">${names[i]}</td>
+                    ${row.map((v, j) => `<td style="padding:4px 8px;text-align:right;border-radius:3px;${cellStyle(v, i, j)}">${v.toFixed(3)}</td>`).join('')}
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>`;
+    } else {
+      corrHTML = `<p style="font-size:12px;color:var(--text-muted);margin-top:12px;">Correlation matrix not available (singular Jacobian or differential evolution without follow-up LM).</p>`;
+    }
+
+    el.innerHTML = `
+      <div style="padding:8px 0;">
+        <div style="display:flex;gap:32px;flex-wrap:wrap;">
+          <div>
+            <div style="font-size:12px;color:var(--text-muted);">Reduced χ²</div>
+            <div style="font-size:22px;font-weight:600;${chiClass}">
+              ${chiNu != null ? chiNu.toFixed(3) : '—'}
+            </div>
+            ${chiNote ? `<div style="font-size:11px;color:var(--text-muted);">${chiNote}</div>` : ''}
+          </div>
+          <div>
+            <div style="font-size:12px;color:var(--text-muted);">RMSE</div>
+            <div style="font-size:22px;font-weight:600;color:var(--text);">
+              ${rmse != null ? rmse.toExponential(3) + ' Ω' : '—'}
+            </div>
+          </div>
+          <div>
+            <div style="font-size:12px;color:var(--text-muted);">AIC / BIC</div>
+            <div style="font-size:16px;font-weight:600;color:var(--text);">
+              ${result.aic != null ? result.aic.toFixed(1) : '—'} / ${result.bic != null ? result.bic.toFixed(1) : '—'}
+            </div>
+          </div>
+        </div>
+        ${corrHTML}
+      </div>`;
   }
 
   function plotVariants(result, el) {
@@ -532,8 +861,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         </table>
       </div>`;
 
-    // Info button toggle
-    const infoBtn = el.querySelector('#variants-info-btn');
+    const infoBtn   = el.querySelector('#variants-info-btn');
     const infoPopup = el.querySelector(`#${infoId}`);
     infoBtn.addEventListener('click', e => {
       e.stopPropagation();
@@ -583,8 +911,8 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       render();
       document.addEventListener('keydown', onKeyDown);
 
-      // Auto-populate freq range inputs from the first file when no range is saved in state.
       const s = getState();
+
       if (s.fitFreqMin === null && s.fitFreqMax === null && s.files?.length && s.columnMap?.frequency) {
         try {
           const res = await fetch('/api/freq-range', {
@@ -599,6 +927,22 @@ export function FittingRunnerView(container, { navigate, showToast }) {
             if (minEl) minEl.value = freq_min;
             if (maxEl) maxEl.value = freq_max;
           }
+        } catch (_) {}
+      }
+
+      if (s.files?.length && s.columnMap) {
+        try {
+          const data = await characterizeFiles({
+            files: s.files,
+            column_map: { ...s.columnMap, decimal_places: s.charDecimalPlaces ?? {} },
+          });
+          charMap.clear();
+          for (const { path, characterization } of data) charMap.set(path, characterization);
+          if (!binByField) {
+            const fields = getCharFields();
+            if (fields.length) binByField = fields[0];
+          }
+          render();
         } catch (_) {}
       }
     },

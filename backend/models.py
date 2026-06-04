@@ -64,6 +64,8 @@ class FitRequest(BaseModel):
     optimize_config: OptimizeConfig = OptimizeConfig()
     freq_min: Optional[float] = None  # Hz — None means no lower limit
     freq_max: Optional[float] = None  # Hz — None means no upper limit
+    weight_by_modulus: bool = True    # use modulus weighting (1/|Z|²) in CNLS fit
+    solver: str = 'lm'               # 'lm' (Levenberg-Marquardt) or 'diff_ev' (differential evolution)
 
 
 class FitResult(BaseModel):
@@ -72,6 +74,7 @@ class FitResult(BaseModel):
     success: bool
     error: Optional[str] = None
     parameters: Dict[str, float] = {}
+    param_names: List[str] = []       # ordered parameter names (for correlation matrix)
     confidence: Dict[str, float] = {}
     frequencies: List[float] = []
     z_real_fit: List[float] = []
@@ -80,6 +83,11 @@ class FitResult(BaseModel):
     z_imag_data: List[float] = []
     characterization: Dict[str, Union[float, str]] = {}
     residual: Optional[float] = None
+    rmse: Optional[float] = None
+    chi_sq_nu: Optional[float] = None                    # reduced chi-squared χ²/(N-p)
+    aic: Optional[float] = None
+    bic: Optional[float] = None
+    correlation: Optional[List[List[float]]] = None      # p×p correlation matrix
     circuit_used: str = ""
     variants_tried: List[VariantResult] = []
 
@@ -91,6 +99,11 @@ class ParseCircuitRequest(BaseModel):
 class FreqRangeRequest(BaseModel):
     path: str
     frequency_column: str
+
+
+class CharacterizeRequest(BaseModel):
+    files: List[FileInfo]
+    column_map: ColumnMap
 
 
 class DRTRequest(BaseModel):
@@ -107,3 +120,29 @@ class DRTResult(BaseModel):
     gamma: List[float] = []
     peaks: List[dict] = []
     characterization: Dict[str, Union[float, str]] = {}
+
+
+class KKRequest(BaseModel):
+    files: List[FileInfo]
+    column_map: ColumnMap
+    freq_min: Optional[float] = None
+    freq_max: Optional[float] = None
+    c: float = 0.85              # Lin-KK μ threshold for stopping M search
+    max_M: int = 50              # maximum number of RC elements
+    residual_threshold: float = 0.01  # |residual| > this fraction → flagged
+
+
+class KKResult(BaseModel):
+    filename: str = ""
+    path: str = ""
+    success: bool = False
+    error: Optional[str] = None
+    M: Optional[int] = None          # number of RC elements used
+    mu: Optional[float] = None       # over/under-fit metric
+    frequencies: List[float] = []
+    res_real: List[float] = []       # normalised real residuals
+    res_imag: List[float] = []       # normalised imag residuals
+    residual_magnitude: List[float] = []  # |res_real² + res_imag²|^0.5
+    flagged_indices: List[int] = []  # indices where residual > threshold
+    freq_min_suggest: Optional[float] = None  # suggested lower freq cutoff
+    freq_max_suggest: Optional[float] = None  # suggested upper freq cutoff

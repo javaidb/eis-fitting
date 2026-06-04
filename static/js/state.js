@@ -23,6 +23,8 @@ const _defaults = {
   charDecimalPlaces: {},
   fitFreqMin: null,
   fitFreqMax: null,
+  fitWeightByModulus: true,
+  fitSolver: 'lm',
   fitting: false,
   _sv: 2,           // schema version — bump when step numbering changes
 };
