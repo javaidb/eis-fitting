@@ -92,10 +92,8 @@ def load_eis_data(
     frequencies = frequencies[mask]
     Z = Z[mask]
 
-    # Extract battery_id string early — needed for per-battery column lookup below.
-    parent = Path(filepath).parent.name
-    _bid_match = re.search(r"(\d+)$", parent)
-    battery_id_str = _bid_match.group(1) if _bid_match else None
+    # Use the actual parent folder name as the battery identifier.
+    battery_id_str = Path(filepath).parent.name or None
 
     # Process all labels: union of global and per-battery characterization keys.
     pb_char = column_map.per_battery_characterization or {}
@@ -148,8 +146,57 @@ def load_eis_data(
                 if len(non_empty):
                     char_values["identifier"] = non_empty.iloc[0]
 
-    # Inject battery_id (already extracted above as battery_id_str)
+    # Inject battery_id as the folder name string.
     if battery_id_str:
-        char_values["battery_id"] = float(battery_id_str)
+        char_values["battery_id"] = battery_id_str
 
     return frequencies, Z, char_values
+
+
+def characterize_files(files, column_map) -> list:
+    results = []
+    for f in files:
+        try:
+            df = pd.read_csv(f.path)
+            battery_id_str = Path(f.path).parent.name or None
+            pb_char = column_map.per_battery_characterization or {}
+            all_labels = list(column_map.characterization.keys()) + [
+                lbl for lbl in pb_char if lbl not in column_map.characterization
+            ]
+            char_values: Dict[str, Union[float, str]] = {}
+            for label in all_labels:
+                col_name = column_map.characterization.get(label, '')
+                if battery_id_str and label in pb_char:
+                    col_name = pb_char[label].get(battery_id_str, col_name)
+                if not col_name or col_name not in df.columns:
+                    continue
+                series = df[col_name]
+                numeric_vals = pd.to_numeric(series, errors="coerce").dropna()
+                if len(numeric_vals):
+                    decimals = column_map.decimal_places.get(label, None)
+                    if decimals is not None:
+                        numeric_vals = numeric_vals.round(decimals)
+                    char_values[label] = round(float(numeric_vals.mean()), 1)
+                    continue
+                non_empty = series.dropna().astype(str).str.strip()
+                non_empty = non_empty[non_empty != ""]
+                if len(non_empty):
+                    char_values[label] = non_empty.iloc[0]
+            if "identifier" not in char_values:
+                id_col = next((c for c in df.columns if _ROLE_PATTERNS["identifier"].search(str(c))), None)
+                if id_col is not None:
+                    series = df[id_col]
+                    numeric_vals = pd.to_numeric(series, errors="coerce").dropna()
+                    if len(numeric_vals):
+                        char_values["identifier"] = round(float(numeric_vals.mean()), 1)
+                    else:
+                        non_empty = series.dropna().astype(str).str.strip()
+                        non_empty = non_empty[non_empty != ""]
+                        if len(non_empty):
+                            char_values["identifier"] = non_empty.iloc[0]
+            if battery_id_str:
+                char_values["battery_id"] = battery_id_str
+            results.append({"path": f.path, "characterization": char_values})
+        except Exception:
+            results.append({"path": f.path, "characterization": {}})
+    return results
