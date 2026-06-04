@@ -190,8 +190,10 @@ export function FittingRunnerView(container, { navigate, showToast }) {
                 <label class="flow-config-item">
                   <span class="flow-config-label">Solver</span>
                   <select id="solver-select" class="flow-select">
-                    <option value="lm"      ${solver === 'lm'      ? 'selected' : ''}>LM</option>
-                    <option value="diff_ev" ${solver === 'diff_ev' ? 'selected' : ''}>Diff. Evo.</option>
+                    <option value="lm"          ${solver === 'lm'          ? 'selected' : ''}>LM</option>
+                    <option value="diff_ev"     ${solver === 'diff_ev'     ? 'selected' : ''}>Diff. Evo.</option>
+                    <option value="basin_hop"   ${solver === 'basin_hop'   ? 'selected' : ''}>Basin Hopping</option>
+                    <option value="nelder_mead" ${solver === 'nelder_mead' ? 'selected' : ''}>Nelder-Mead</option>
                   </select>
                 </label>
               </div>
