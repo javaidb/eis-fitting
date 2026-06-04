@@ -157,16 +157,16 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         <div class="flow-section flow-section-config">
           <div class="flow-section-label">2 · Configure</div>
           <div class="flow-section-body">
-            <div class="flow-config-grid">
-              <span class="flow-config-label">Timeout</span>
-              <label class="flow-config-control">
+            <div class="flow-config-row">
+              <label class="flow-config-item">
+                <span class="flow-config-label">Timeout</span>
                 <input id="fit-timeout" type="number" min="5" max="600" step="5"
                        value="${state.fitTimeout ?? 60}" class="flow-input flow-input-sm">
-                <span class="flow-unit">s / file</span>
+                <span class="flow-unit">s</span>
               </label>
 
-              <span class="flow-config-label">Freq</span>
-              <label class="flow-config-control">
+              <label class="flow-config-item">
+                <span class="flow-config-label">Freq</span>
                 <input id="freq-min" type="number" min="0" step="any"
                        value="${state.fitFreqMin ?? ''}" placeholder="min" class="flow-input flow-input-md">
                 <span class="flow-unit">–</span>
@@ -175,20 +175,19 @@ export function FittingRunnerView(container, { navigate, showToast }) {
                 <span class="flow-unit">Hz</span>
               </label>
 
-              <span class="flow-config-label">Weight</span>
-              <label class="flow-config-control flow-config-check"
+              <label class="flow-config-item flow-config-check"
                      title="Modulus weighting (1/|Z|²) — recommended for most EIS data">
                 <input type="checkbox" id="weight-modulus-cb" ${weightChecked ? 'checked' : ''}>
-                <span>Modulus (1/|Z|²)</span>
+                <span>Modulus</span>
               </label>
 
-              <span class="flow-config-label">Solver</span>
-              <div class="flow-config-control">
+              <label class="flow-config-item">
+                <span class="flow-config-label">Solver</span>
                 <select id="solver-select" class="flow-select">
-                  <option value="lm"      ${solver === 'lm'      ? 'selected' : ''}>LM — fast</option>
-                  <option value="diff_ev" ${solver === 'diff_ev' ? 'selected' : ''}>Diff. Evo. — global</option>
+                  <option value="lm"      ${solver === 'lm'      ? 'selected' : ''}>LM</option>
+                  <option value="diff_ev" ${solver === 'diff_ev' ? 'selected' : ''}>Diff. Evo.</option>
                 </select>
-              </div>
+              </label>
             </div>
           </div>
         </div>

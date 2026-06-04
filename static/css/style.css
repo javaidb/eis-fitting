@@ -620,26 +620,27 @@ select option { background: var(--surface2); }
   user-select: none;
 }
 
-/* Configure section grid */
-.flow-config-grid {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 5px 10px;
+/* Configure section — inline row of controls */
+.flow-config-row {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  gap: 16px;
+  flex: 1;
 }
-.flow-config-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-.flow-config-control {
+.flow-config-item {
   display: flex;
   align-items: center;
   gap: 5px;
   font-size: 11px;
   color: var(--text-muted);
+  white-space: nowrap;
+  cursor: default;
 }
 .flow-config-check { cursor: pointer; }
+.flow-config-label {
+  color: var(--text-muted);
+}
 
 .flow-input {
   padding: 3px 5px;
