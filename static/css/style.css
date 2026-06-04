@@ -550,6 +550,22 @@ select option { background: var(--surface2); }
 /* ───────────────────────────────────────────
    Fit view — three-step flow panel
 ─────────────────────────────────────────── */
+
+/* Outer row: panel shrinks to content, Trends pushed to far right */
+.fit-panel-row {
+  display: flex;
+  align-items: stretch;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.fit-panel-row .fit-flow-panel {
+  flex-shrink: 0;
+  margin-bottom: 0;
+}
+.fit-panel-row #next-btn {
+  margin-left: auto;
+}
+
 .fit-flow-panel {
   display: flex;
   align-items: stretch;
@@ -577,7 +593,7 @@ select option { background: var(--surface2); }
   background: var(--surface);
   min-width: 0;
 }
-.flow-section-config { flex: 1; }
+.flow-section-config { flex-shrink: 0; }
 .flow-section-run { flex-shrink: 0; min-width: 130px; }
 
 .flow-section-label {
