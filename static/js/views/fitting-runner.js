@@ -42,6 +42,7 @@ function configKey(state) {
     freqMax:  state.fitFreqMax ?? null,
     weight:   state.fitWeightByModulus ?? true,
     solver:   state.fitSolver ?? 'lm',
+    kkData:   state.kkData ?? {},  // per-file ranges change the fit — invalidate cache when KK reruns
   });
 }
 
@@ -131,6 +132,87 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         &nbsp;·&nbsp; ${files.length} file(s)
       </div>
 
+      <!-- Three-step flow panel: KK → Configure → Fit -->
+      <div class="fit-flow-panel">
+
+        <!-- Back nav -->
+        <div class="flow-back-col">
+          <button class="btn btn-secondary" id="back-btn" title="Back to bounds editor">←</button>
+        </div>
+
+        <!-- Step 1: KK Check -->
+        <div class="flow-section">
+          <div class="flow-section-label">1 · KK Check</div>
+          <div class="flow-section-body">
+            <button class="btn btn-secondary" id="kk-run-btn" ${!ready ? 'disabled' : ''} style="width:100%;">
+              KK Check
+            </button>
+            <div class="flow-hint">Validate linearity, flag bad points, estimate Rs</div>
+          </div>
+        </div>
+
+        <div class="flow-arrow-col">›</div>
+
+        <!-- Step 2: Configure -->
+        <div class="flow-section flow-section-config">
+          <div class="flow-section-label">2 · Configure</div>
+          <div class="flow-section-body">
+            <div class="flow-config-grid">
+              <span class="flow-config-label">Timeout</span>
+              <label class="flow-config-control">
+                <input id="fit-timeout" type="number" min="5" max="600" step="5"
+                       value="${state.fitTimeout ?? 60}" class="flow-input flow-input-sm">
+                <span class="flow-unit">s / file</span>
+              </label>
+
+              <span class="flow-config-label">Freq</span>
+              <label class="flow-config-control">
+                <input id="freq-min" type="number" min="0" step="any"
+                       value="${state.fitFreqMin ?? ''}" placeholder="min" class="flow-input flow-input-md">
+                <span class="flow-unit">–</span>
+                <input id="freq-max" type="number" min="0" step="any"
+                       value="${state.fitFreqMax ?? ''}" placeholder="max" class="flow-input flow-input-md">
+                <span class="flow-unit">Hz</span>
+              </label>
+
+              <span class="flow-config-label">Weight</span>
+              <label class="flow-config-control flow-config-check"
+                     title="Modulus weighting (1/|Z|²) — recommended for most EIS data">
+                <input type="checkbox" id="weight-modulus-cb" ${weightChecked ? 'checked' : ''}>
+                <span>Modulus (1/|Z|²)</span>
+              </label>
+
+              <span class="flow-config-label">Solver</span>
+              <div class="flow-config-control">
+                <select id="solver-select" class="flow-select">
+                  <option value="lm"      ${solver === 'lm'      ? 'selected' : ''}>LM — fast</option>
+                  <option value="diff_ev" ${solver === 'diff_ev' ? 'selected' : ''}>Diff. Evo. — global</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="flow-arrow-col">›</div>
+
+        <!-- Step 3: Run Fit -->
+        <div class="flow-section flow-section-run">
+          <div class="flow-section-label">3 · Fit</div>
+          <div class="flow-section-body">
+            <button class="btn btn-primary" id="run-btn" ${!ready ? 'disabled' : ''} style="width:100%;">
+              ${cached ? '↺ Re-run' : '▶ Run Fitting'}
+            </button>
+            <button class="btn btn-danger" id="stop-btn" style="display:none;width:100%;">■ Stop</button>
+            <button class="btn btn-secondary" id="next-btn"
+                    ${!state.fitResults?.length ? 'disabled' : ''} style="width:100%;margin-top:4px;">
+              Trends →
+            </button>
+          </div>
+        </div>
+
+      </div><!-- /fit-flow-panel -->
+
+      <!-- Progress bar (below the flow panel, full width) -->
       <div class="fitting-status" id="fit-status" style="display:none;">
         <div class="progress-label" id="progress-label">Starting…</div>
         <div class="progress-bar-wrap"><div class="progress-bar-fill" id="progress-bar"></div></div>
@@ -142,50 +224,6 @@ export function FittingRunnerView(container, { navigate, showToast }) {
             ? `<div class="cache-banner stale" id="cache-banner">⚠ Config changed — results below are from a previous run.</div>`
             : '')
       }
-
-      <div class="step-actions" style="margin-bottom:20px;">
-        <button class="btn btn-secondary" id="back-btn">← Back</button>
-        <div class="spacer"></div>
-
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
-          Timeout
-          <input id="fit-timeout" type="number" min="5" max="600" step="5"
-                 value="${state.fitTimeout ?? 60}"
-                 style="width:64px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;text-align:right;">
-          s / fit
-        </label>
-
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
-          Freq
-          <input id="freq-min" type="number" min="0" step="any"
-                 value="${state.fitFreqMin ?? ''}" placeholder="min"
-                 style="width:72px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;text-align:right;">
-          –
-          <input id="freq-max" type="number" min="0" step="any"
-                 value="${state.fitFreqMax ?? ''}" placeholder="max"
-                 style="width:72px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;text-align:right;">
-          Hz
-        </label>
-
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);"
-               title="Modulus weighting (1/|Z|²) — recommended for most EIS data">
-          <input type="checkbox" id="weight-modulus-cb" ${weightChecked ? 'checked' : ''}>
-          Modulus weight
-        </label>
-
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
-          Solver
-          <select id="solver-select" style="padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;">
-            <option value="lm"      ${solver === 'lm'      ? 'selected' : ''}>LM (fast)</option>
-            <option value="diff_ev" ${solver === 'diff_ev' ? 'selected' : ''}>Diff. Evo. (global)</option>
-          </select>
-        </label>
-
-        <button class="btn btn-danger"    id="stop-btn"   style="display:none;">■ Stop</button>
-        <button class="btn btn-secondary" id="kk-run-btn" ${!ready ? 'disabled' : ''}>KK Check</button>
-        <button class="btn btn-primary"   id="run-btn"    ${!ready ? 'disabled' : ''}>${cached ? '↺ Re-run Fitting' : '▶ Run Fitting'}</button>
-        <button class="btn btn-secondary" id="next-btn"   ${!state.fitResults?.length ? 'disabled' : ''}>View Trends →</button>
-      </div>
 
       <div class="fit-sort-bar">
         <span style="font-size:12px;color:var(--text-muted);">Bin by</span>

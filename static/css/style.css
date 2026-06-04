@@ -548,6 +548,123 @@ select option { background: var(--surface2); }
 .params-summary span { color: var(--text); font-weight: 600; margin-right: 8px; }
 
 /* ───────────────────────────────────────────
+   Fit view — three-step flow panel
+─────────────────────────────────────────── */
+.fit-flow-panel {
+  display: flex;
+  align-items: stretch;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* Thin back-nav column at far left */
+.flow-back-col {
+  display: flex;
+  align-items: center;
+  padding: 10px 10px;
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* Each labelled section */
+.flow-section {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 16px 14px;
+  background: var(--surface);
+  min-width: 0;
+}
+.flow-section-config { flex: 1; }
+.flow-section-run { flex-shrink: 0; min-width: 130px; }
+
+.flow-section-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  opacity: 0.65;
+  margin-bottom: 8px;
+}
+
+.flow-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.flow-hint {
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1.4;
+  max-width: 110px;
+}
+
+/* Arrow column between sections */
+.flow-arrow-col {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  color: var(--border-light);
+  font-size: 22px;
+  flex-shrink: 0;
+  min-width: 26px;
+  user-select: none;
+}
+
+/* Configure section grid */
+.flow-config-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 10px;
+  align-items: center;
+}
+.flow-config-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.flow-config-control {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.flow-config-check { cursor: pointer; }
+
+.flow-input {
+  padding: 3px 5px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  text-align: right;
+}
+.flow-input-sm  { width: 52px; }
+.flow-input-md  { width: 62px; }
+.flow-unit { color: var(--text-dim); font-size: 11px; }
+
+.flow-select {
+  padding: 3px 5px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  width: 100%;
+}
+
+/* ───────────────────────────────────────────
    Fit tile grid
 ─────────────────────────────────────────── */
 .fit-sort-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
