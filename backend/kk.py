@@ -4,7 +4,13 @@ import json
 from typing import AsyncGenerator, Optional
 
 import numpy as np
+from impedance import validation as _imp_validation
 from impedance.validation import linKK
+
+# Workaround for a bug in this version of impedance.py: eval_linKK calls
+# eval(circuit_string, circuit_elements) but numpy is not in that namespace,
+# causing NameError when any element function references np internally.
+_imp_validation.circuit_elements.setdefault('np', np)
 
 from .file_handler import load_eis_data
 from .models import KKRequest, KKResult
