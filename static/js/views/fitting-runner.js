@@ -40,7 +40,7 @@ function configKey(state) {
     optimize: state.optimizeConfig ?? { enabled: false },
     freqMin:  state.fitFreqMin ?? null,
     freqMax:  state.fitFreqMax ?? null,
-    weight:   state.fitWeightByModulus ?? true,
+    weight:   state.fitWeighting ?? 'none',
     solver:   state.fitSolver ?? 'lm',
     kkData:   state.kkData ?? {},  // per-file ranges change the fit — invalidate cache when KK reruns
   });
@@ -115,8 +115,8 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       if (files[i]) resultMap.set(files[i].path, r);
     });
 
-    const weightChecked = state.fitWeightByModulus ?? true;
-    const solver        = state.fitSolver ?? 'lm';
+    const weighting = state.fitWeighting ?? 'none';
+    const solver    = state.fitSolver ?? 'lm';
 
     container.innerHTML = `
       <div class="section-header">Fit</div>
@@ -132,84 +132,95 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         &nbsp;·&nbsp; ${files.length} file(s)
       </div>
 
-      <!-- Three-step flow panel: KK → Configure → Fit -->
-      <div class="fit-flow-panel">
+      <!-- Flow panel + standalone Trends button -->
+      <div class="fit-panel-row">
 
-        <!-- Back nav -->
-        <div class="flow-back-col">
-          <button class="btn btn-secondary" id="back-btn" title="Back to bounds editor">←</button>
-        </div>
+        <!-- Three-step flow panel: KK → Configure → Fit -->
+        <div class="fit-flow-panel">
 
-        <!-- Step 1: KK Check -->
-        <div class="flow-section">
-          <div class="flow-section-label">1 · KK Check</div>
-          <div class="flow-section-body">
-            <button class="btn btn-secondary" id="kk-run-btn" ${!ready ? 'disabled' : ''} style="width:100%;">
-              KK Check
-            </button>
-            <div class="flow-hint">Validate linearity, flag bad points, estimate Rs</div>
+          <!-- Back nav -->
+          <div class="flow-back-col">
+            <button class="btn btn-secondary" id="back-btn" title="Back to bounds editor">←</button>
           </div>
-        </div>
 
-        <div class="flow-arrow-col">›</div>
-
-        <!-- Step 2: Configure -->
-        <div class="flow-section flow-section-config">
-          <div class="flow-section-label">2 · Configure</div>
-          <div class="flow-section-body">
-            <div class="flow-config-row">
-              <label class="flow-config-item">
-                <span class="flow-config-label">Timeout</span>
-                <input id="fit-timeout" type="number" min="5" max="600" step="5"
-                       value="${state.fitTimeout ?? 60}" class="flow-input flow-input-sm">
-                <span class="flow-unit">s</span>
-              </label>
-
-              <label class="flow-config-item">
-                <span class="flow-config-label">Freq</span>
-                <input id="freq-min" type="number" min="0" step="any"
-                       value="${state.fitFreqMin ?? ''}" placeholder="min" class="flow-input flow-input-md">
-                <span class="flow-unit">–</span>
-                <input id="freq-max" type="number" min="0" step="any"
-                       value="${state.fitFreqMax ?? ''}" placeholder="max" class="flow-input flow-input-md">
-                <span class="flow-unit">Hz</span>
-              </label>
-
-              <label class="flow-config-item flow-config-check"
-                     title="Modulus weighting (1/|Z|²) — recommended for most EIS data">
-                <input type="checkbox" id="weight-modulus-cb" ${weightChecked ? 'checked' : ''}>
-                <span>Modulus</span>
-              </label>
-
-              <label class="flow-config-item">
-                <span class="flow-config-label">Solver</span>
-                <select id="solver-select" class="flow-select">
-                  <option value="lm"      ${solver === 'lm'      ? 'selected' : ''}>LM</option>
-                  <option value="diff_ev" ${solver === 'diff_ev' ? 'selected' : ''}>Diff. Evo.</option>
-                </select>
-              </label>
+          <!-- Step 1: KK Check -->
+          <div class="flow-section">
+            <div class="flow-section-label">1 · KK Check</div>
+            <div class="flow-section-body">
+              <button class="btn btn-secondary" id="kk-run-btn" ${!ready ? 'disabled' : ''} style="width:100%;">
+                KK Check
+              </button>
+              <div class="flow-hint">Validate linearity, flag bad points, estimate Rs</div>
             </div>
           </div>
-        </div>
 
-        <div class="flow-arrow-col">›</div>
+          <div class="flow-arrow-col">›</div>
 
-        <!-- Step 3: Run Fit -->
-        <div class="flow-section flow-section-run">
-          <div class="flow-section-label">3 · Fit</div>
-          <div class="flow-section-body">
-            <button class="btn btn-primary" id="run-btn" ${!ready ? 'disabled' : ''} style="width:100%;">
-              ${cached ? '↺ Re-run' : '▶ Run Fitting'}
-            </button>
-            <button class="btn btn-danger" id="stop-btn" style="display:none;width:100%;">■ Stop</button>
-            <button class="btn btn-secondary" id="next-btn"
-                    ${!state.fitResults?.length ? 'disabled' : ''} style="width:100%;margin-top:4px;">
-              Trends →
-            </button>
+          <!-- Step 2: Configure -->
+          <div class="flow-section flow-section-config">
+            <div class="flow-section-label">2 · Configure</div>
+            <div class="flow-section-body">
+              <div class="flow-config-row">
+                <label class="flow-config-item">
+                  <span class="flow-config-label">Timeout</span>
+                  <input id="fit-timeout" type="number" min="5" max="600" step="5"
+                         value="${state.fitTimeout ?? 60}" class="flow-input flow-input-sm">
+                  <span class="flow-unit">s</span>
+                </label>
+
+                <label class="flow-config-item">
+                  <span class="flow-config-label">Freq</span>
+                  <input id="freq-min" type="number" min="0" step="any"
+                         value="${state.fitFreqMin ?? ''}" placeholder="min" class="flow-input flow-input-md">
+                  <span class="flow-unit">–</span>
+                  <input id="freq-max" type="number" min="0" step="any"
+                         value="${state.fitFreqMax ?? ''}" placeholder="max" class="flow-input flow-input-md">
+                  <span class="flow-unit">Hz</span>
+                </label>
+
+                <label class="flow-config-item">
+                  <span class="flow-config-label">Weight</span>
+                  <select id="weighting-select" class="flow-select">
+                    <option value="none"         ${weighting === 'none'         ? 'selected' : ''}>None</option>
+                    <option value="modulus"       ${weighting === 'modulus'       ? 'selected' : ''}>Modulus (1/|Z|²)</option>
+                    <option value="proportional"  ${weighting === 'proportional'  ? 'selected' : ''}>Proportional (1/Z'², 1/Z''²)</option>
+                  </select>
+                </label>
+
+                <label class="flow-config-item">
+                  <span class="flow-config-label">Solver</span>
+                  <select id="solver-select" class="flow-select">
+                    <option value="lm"      ${solver === 'lm'      ? 'selected' : ''}>LM</option>
+                    <option value="diff_ev" ${solver === 'diff_ev' ? 'selected' : ''}>Diff. Evo.</option>
+                  </select>
+                </label>
+              </div>
+            </div>
           </div>
-        </div>
 
-      </div><!-- /fit-flow-panel -->
+          <div class="flow-arrow-col">›</div>
+
+          <!-- Step 3: Run Fit -->
+          <div class="flow-section flow-section-run">
+            <div class="flow-section-label">3 · Fit</div>
+            <div class="flow-section-body">
+              <button class="btn btn-primary" id="run-btn" ${!ready ? 'disabled' : ''} style="width:100%;">
+                ${cached ? '↺ Re-run' : '▶ Run Fitting'}
+              </button>
+              <button class="btn btn-danger" id="stop-btn" style="display:none;width:100%;">■ Stop</button>
+            </div>
+          </div>
+
+        </div><!-- /fit-flow-panel -->
+
+        <!-- Standalone Trends navigation, far right -->
+        <button class="btn btn-secondary" id="next-btn"
+                ${!state.fitResults?.length ? 'disabled' : ''}
+                style="align-self:stretch;white-space:nowrap;">
+          View Trends →
+        </button>
+
+      </div><!-- /fit-panel-row -->
 
       <!-- Progress bar (below the flow panel, full width) -->
       <div class="fitting-status" id="fit-status" style="display:none;">
@@ -265,8 +276,8 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     container.querySelector('#fit-modal').addEventListener('click', e => {
       if (e.target === e.currentTarget) closeModal();
     });
-    container.querySelector('#weight-modulus-cb').addEventListener('change', e => {
-      setState({ fitWeightByModulus: e.target.checked });
+    container.querySelector('#weighting-select').addEventListener('change', e => {
+      setState({ fitWeighting: e.target.value });
     });
     container.querySelector('#solver-select').addEventListener('change', e => {
       setState({ fitSolver: e.target.value });
@@ -777,14 +788,14 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     const freqMaxVal      = container.querySelector('#freq-max').value.trim();
     const freqMin         = freqMinVal !== '' ? parseFloat(freqMinVal) : null;
     const freqMax         = freqMaxVal !== '' ? parseFloat(freqMaxVal) : null;
-    const weightByModulus = container.querySelector('#weight-modulus-cb').checked;
-    const solver          = container.querySelector('#solver-select').value;
+    const weighting   = container.querySelector('#weighting-select').value;
+    const solver      = container.querySelector('#solver-select').value;
     const runCacheKey = configKey({ ...state, fitTimeout: timeout, fitFreqMin: freqMin,
-                                   fitFreqMax: freqMax, fitWeightByModulus: weightByModulus, fitSolver: solver });
+                                   fitFreqMax: freqMax, fitWeighting: weighting, fitSolver: solver });
 
     try {
       setState({ fitTimeout: timeout, fitFreqMin: freqMin, fitFreqMax: freqMax,
-                 fitWeightByModulus: weightByModulus, fitSolver: solver });
+                 fitWeighting: weighting, fitSolver: solver });
 
       // Attach per-file KK-derived freq range and Rs estimate to each FileInfo.
       // Per-file values take priority in the backend; global inputs are the fallback.
@@ -807,7 +818,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         optimize_config:   state.optimizeConfig ?? { enabled: false },
         freq_min:          freqMin,   // global fallback (backend only uses if per-file is null)
         freq_max:          freqMax,
-        weight_by_modulus: weightByModulus,
+        weighting:         weighting,
         solver:            solver,
       };
 

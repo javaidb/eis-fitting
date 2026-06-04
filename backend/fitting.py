@@ -177,6 +177,27 @@ def _compute_aic_bic(Z: np.ndarray, Z_fit: np.ndarray, k: int) -> tuple[float, f
     return float(ll + 2 * k), float(ll + k * np.log(n))
 
 
+# ── weighting helpers ─────────────────────────────────────────────────────────
+
+def _compute_sigma(Z: np.ndarray, weighting: str) -> np.ndarray | None:
+    """Return the sigma array for scipy curve_fit, or None for unit (unweighted) fitting.
+
+    'none'         — unit weighting (σ=None, all observations equally weighted)
+    'modulus'      — σ_i = |Z_i| for both real and imag (1/|Z|² effective weight)
+    'proportional' — σ_r = |Z'_i|, σ_i = |Z''_i| separately; floored to avoid
+                     division by zero near the real-axis crossing
+    """
+    if weighting == 'modulus':
+        mod = np.maximum(np.abs(Z), 1e-30)
+        return np.concatenate([mod, mod])
+    if weighting == 'proportional':
+        # Floor imaginary sigma at 1% of the real part to avoid instability near Z''≈0
+        sr = np.maximum(np.abs(Z.real), 1e-30)
+        si = np.maximum(np.abs(Z.imag), np.abs(Z.real) * 0.01 + 1e-30)
+        return np.concatenate([sr, si])
+    return None  # 'none' → unweighted
+
+
 # ── scipy-based fitting primitives ───────────────────────────────────────────
 
 def _make_model_func(circuit_string: str, frequencies: np.ndarray):
@@ -200,7 +221,7 @@ def _do_lm_fit(
     uppers: List[float],
     frequencies: np.ndarray,
     Z: np.ndarray,
-    weight_by_modulus: bool = True,
+    weighting: str = 'none',
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
     """Fit circuit via scipy TRF (bounded LM). Returns (popt, pcov, Z_fit).
 
@@ -208,12 +229,7 @@ def _do_lm_fit(
     """
     model_func, c, x_dummy = _make_model_func(circuit_string, frequencies)
     Z_target = np.concatenate([Z.real, Z.imag])
-
-    sigma = None
-    if weight_by_modulus:
-        mod = np.maximum(np.abs(Z), 1e-30)
-        sigma = np.concatenate([mod, mod])
-
+    sigma = _compute_sigma(Z, weighting)
     uppers_safe = [float('inf') if np.isinf(u) else u for u in uppers]
 
     popt, pcov = curve_fit(
@@ -241,7 +257,7 @@ def _do_diff_ev_fit(
     uppers: List[float],
     frequencies: np.ndarray,
     Z: np.ndarray,
-    weight_by_modulus: bool = True,
+    weighting: str = 'none',
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
     """Fit circuit via differential evolution. Returns (popt, pcov, Z_fit).
 
@@ -249,7 +265,7 @@ def _do_diff_ev_fit(
     follow-up TRF fit starting from the DE solution.
     """
     model_func, c, _ = _make_model_func(circuit_string, frequencies)
-    mod = np.maximum(np.abs(Z), 1e-30) if weight_by_modulus else None
+    sigma = _compute_sigma(Z, weighting)
 
     def objective(params: np.ndarray) -> float:
         try:
@@ -257,8 +273,9 @@ def _do_diff_ev_fit(
             Z_pred = c.predict(frequencies)
             res_r = Z.real - Z_pred.real
             res_i = Z.imag - Z_pred.imag
-            if weight_by_modulus:
-                return float(np.sum((res_r / mod) ** 2 + (res_i / mod) ** 2))
+            if sigma is not None:
+                n = len(Z)
+                return float(np.sum((res_r / sigma[:n]) ** 2 + (res_i / sigma[n:]) ** 2))
             return float(np.sum(res_r ** 2 + res_i ** 2))
         except Exception:
             return 1e30
@@ -275,7 +292,7 @@ def _do_diff_ev_fit(
     de_result = _diff_ev(
         objective, bounds_de,
         seed=42, maxiter=1000, tol=1e-7,
-        polish=True,  # final LM polish at DE minimum
+        polish=True,
         workers=1,
     )
     popt = de_result.x
@@ -284,7 +301,7 @@ def _do_diff_ev_fit(
     pcov = None
     try:
         _, pcov, _ = _do_lm_fit(circuit_string, popt.tolist(), lowers, uppers,
-                                  frequencies, Z, weight_by_modulus)
+                                  frequencies, Z, weighting)
     except Exception:
         pass
 
@@ -295,19 +312,21 @@ def _do_diff_ev_fit(
 # ── post-fit statistics ───────────────────────────────────────────────────────
 
 def _compute_chi_sq_nu(
-    Z: np.ndarray, Z_fit: np.ndarray, k: int, weight_by_modulus: bool
+    Z: np.ndarray, Z_fit: np.ndarray, k: int, weighting: str
 ) -> float | None:
     """Reduced chi-squared χ²/(N−p).  N = 2·len(Z) (real+imag), p = k."""
     N = 2 * len(Z)
     dof = N - k
     if dof <= 0:
         return None
-    if weight_by_modulus:
-        mod = np.maximum(np.abs(Z), 1e-30)
-        chi_sq = float(np.sum(((Z.real - Z_fit.real) / mod) ** 2 +
-                              ((Z.imag - Z_fit.imag) / mod) ** 2))
+    sigma = _compute_sigma(Z, weighting)
+    res_r = Z.real - Z_fit.real
+    res_i = Z.imag - Z_fit.imag
+    if sigma is not None:
+        n = len(Z)
+        chi_sq = float(np.sum((res_r / sigma[:n]) ** 2 + (res_i / sigma[n:]) ** 2))
     else:
-        chi_sq = float(np.sum((Z.real - Z_fit.real) ** 2 + (Z.imag - Z_fit.imag) ** 2))
+        chi_sq = float(np.sum(res_r ** 2 + res_i ** 2))
     return chi_sq / dof
 
 
@@ -342,7 +361,7 @@ def fit_single(
     filepath: str,
     optimize_config: OptimizeConfig | None = None,
     column_map: ColumnMap | None = None,
-    weight_by_modulus: bool = True,
+    weighting: str = 'none',
     solver: str = 'lm',
     rs_estimate: float | None = None,
 ) -> FitResult:
@@ -385,7 +404,7 @@ def fit_single(
                 # Single DE run (already global — no multi-start needed)
                 popt, pcov, Z_try = _do_diff_ev_fit(
                     variant_circuit, initials, lowers, uppers,
-                    frequencies, Z, weight_by_modulus,
+                    frequencies, Z, weighting,
                 )
                 best_popt, best_pcov, Z_fit = popt, pcov, Z_try
 
@@ -396,9 +415,9 @@ def fit_single(
                     try:
                         popt, pcov, Z_try = _do_lm_fit(
                             variant_circuit, guess, lowers, uppers,
-                            frequencies, Z, weight_by_modulus,
+                            frequencies, Z, weighting,
                         )
-                        # Compare by modulus-weighted objective so restarts are fairly ranked.
+                        # Rank restarts by modulus-weighted objective for consistency
                         mod = np.maximum(np.abs(Z), 1e-30)
                         obj = float(np.sum(((Z.real - Z_try.real) / mod) ** 2 +
                                           ((Z.imag - Z_try.imag) / mod) ** 2))
@@ -415,7 +434,7 @@ def fit_single(
 
             residual = float(np.mean(np.abs(Z - Z_fit) / (np.abs(Z) + 1e-12)))
             aic, bic = _compute_aic_bic(Z, Z_fit, k)
-            chi_sq_nu = _compute_chi_sq_nu(Z, Z_fit, k, weight_by_modulus)
+            chi_sq_nu = _compute_chi_sq_nu(Z, Z_fit, k, weighting)
             rmse = _compute_rmse(Z, Z_fit)
             correlation = _compute_correlation(best_pcov)
             score = aic if criterion == 'AIC' else bic
@@ -524,7 +543,7 @@ async def fit_batch_stream(request: FitRequest) -> AsyncGenerator[str, None]:
                     file_info.path,
                     request.optimize_config,
                     request.column_map,
-                    request.weight_by_modulus,
+                    request.weighting,
                     request.solver,
                     file_info.rs_estimate,
                 ),

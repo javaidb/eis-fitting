@@ -23,7 +23,7 @@ const _defaults = {
   charDecimalPlaces: {},
   fitFreqMin: null,
   fitFreqMax: null,
-  fitWeightByModulus: true,
+  fitWeighting: 'none',
   fitSolver: 'lm',
   kkData: {},   // path → { freqMin, freqMax, rsEst, M, mu } from last KK run
   fitting: false,

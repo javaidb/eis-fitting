@@ -67,7 +67,7 @@ class FitRequest(BaseModel):
     optimize_config: OptimizeConfig = OptimizeConfig()
     freq_min: Optional[float] = None  # Hz — None means no lower limit
     freq_max: Optional[float] = None  # Hz — None means no upper limit
-    weight_by_modulus: bool = True    # use modulus weighting (1/|Z|²) in CNLS fit
+    weighting: str = 'none'           # 'none' | 'modulus' (1/|Z|²) | 'proportional' (1/Z'², 1/Z''²)
     solver: str = 'lm'               # 'lm' (Levenberg-Marquardt) or 'diff_ev' (differential evolution)
 
 
