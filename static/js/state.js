@@ -12,7 +12,7 @@ const _defaults = {
   circuitTree: { nodes: [] },
   circuitString: '',
   circuitConfig: null,
-  optimizeConfig: { enabled: false, rc_min: 1, rc_max: 5, pair_types: ['CPE'], criterion: 'AIC', n_restarts: 1 },
+  optimizeConfig: { enabled: false, rc_min: 1, rc_max: 2, pair_types: ['CPE'], criterion: 'AIC', n_restarts: 1 },
   fitResults: [],
   fitCacheKey: null,
   drtResults: [],
@@ -25,6 +25,7 @@ const _defaults = {
   fitFreqMax: null,
   fitWeighting: 'none',
   fitSolver: 'lm',
+  omitInductive: false,
   kkData: {},   // path → { freqMin, freqMax, rsEst, M, mu } from last KK run
   fitting: false,
   _sv: 2,           // schema version — bump when step numbering changes
