@@ -43,7 +43,7 @@ class CircuitConfig(BaseModel):
 class OptimizeConfig(BaseModel):
     enabled: bool = False
     rc_min: int = 1       # minimum RC pair count to search
-    rc_max: int = 5       # maximum RC pair count to search
+    rc_max: int = 2       # maximum RC pair count to search
     pair_types: List[str] = ["CPE"]  # "CPE" → p(R,CPE), "C" → p(R,C)
     criterion: str = "AIC"           # "AIC" or "BIC"
     n_restarts: int = 1  # random re-initialisations per variant; 1 = single fit
@@ -69,6 +69,7 @@ class FitRequest(BaseModel):
     freq_max: Optional[float] = None  # Hz — None means no upper limit
     weighting: str = 'none'           # 'none' | 'modulus' (1/|Z|²) | 'proportional' (1/Z'², 1/Z''²)
     solver: str = 'lm'               # 'lm' (Levenberg-Marquardt) or 'diff_ev' (differential evolution)
+    omit_inductive: bool = False      # drop points where Z.imag > 0 before fitting
 
 
 class FitResult(BaseModel):
@@ -77,7 +78,8 @@ class FitResult(BaseModel):
     success: bool
     error: Optional[str] = None
     parameters: Dict[str, float] = {}
-    param_names: List[str] = []       # ordered parameter names (for correlation matrix)
+    initial_guess: Dict[str, float] = {}  # resolved initial values used to seed the optimizer
+    param_names: List[str] = []           # ordered parameter names (for correlation matrix)
     confidence: Dict[str, float] = {}
     frequencies: List[float] = []
     z_real_fit: List[float] = []
@@ -125,6 +127,21 @@ class DRTResult(BaseModel):
     characterization: Dict[str, Union[float, str]] = {}
 
 
+class EnvelopeRequest(BaseModel):
+    circuit_string: str
+    parameters: Dict[str, float]
+    confidence: Dict[str, float]   # param name → 1σ
+    frequencies: List[float]
+    n_samples: int = 200
+
+
+class EnvelopeResponse(BaseModel):
+    z_real_upper: List[float]
+    z_real_lower: List[float]
+    z_imag_upper: List[float]
+    z_imag_lower: List[float]
+
+
 class KKRequest(BaseModel):
     files: List[FileInfo]
     column_map: ColumnMap
@@ -151,4 +168,5 @@ class KKResult(BaseModel):
     flagged_indices: List[int] = []  # indices where residual > threshold
     freq_min_suggest: Optional[float] = None  # suggested lower freq cutoff (Hz)
     freq_max_suggest: Optional[float] = None  # suggested upper freq cutoff (Hz)
-    rs_estimate: Optional[float] = None       # Z' at highest frequency → R_s estimate (Ω)
+    rs_estimate: Optional[float] = None       # HF real-axis intercept → R_s (Ω)
+    lf_intercept: Optional[float] = None      # LF real-axis intercept → R_s + R_1 (Ω)
