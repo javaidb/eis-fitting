@@ -17,6 +17,7 @@ const _defaults = {
   fitCacheKey: null,
   drtResults: [],
   drtLambda: 1e-3,
+  drtSelectedFile: null,
   drtExpBattery: null,
   drtExpIdentifier: null,
   charUnits: {},
