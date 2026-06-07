@@ -41,6 +41,18 @@ export function characterizeFiles(request) {
   return post('/api/characterize', request);
 }
 
+export function computeDRTSingle(request) {
+  return post('/api/drt-single', request);
+}
+
+export function computeDRTAuto(request) {
+  return post('/api/drt-auto-single', request);
+}
+
+export function computeLCurve(request) {
+  return post('/api/drt-lcurve', request);
+}
+
 export async function* streamDRT(request) {
   const res = await fetch('/api/drt', {
     method: 'POST',
