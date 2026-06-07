@@ -1,13 +1,15 @@
 from __future__ import annotations
+import asyncio
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.drt import drt_batch_stream
 from backend.file_handler import characterize_files, scan_folder
-from backend.fitting import fit_batch_stream, get_param_names
+from backend.fitting import compute_fit_envelope, fit_batch_stream, get_param_names
 from backend.kk import kk_batch_stream
-from backend.models import CharacterizeRequest, DRTRequest, FitRequest, FreqRangeRequest, KKRequest, ParseCircuitRequest, ScanFolderRequest
+from backend.models import CharacterizeRequest, DRTRequest, EnvelopeRequest, EnvelopeResponse, FitRequest, FreqRangeRequest, KKRequest, ParseCircuitRequest, ScanFolderRequest
 
 app = FastAPI(title="EIS Fitting")
 
@@ -118,6 +120,28 @@ async def api_freq_range(request: FreqRangeRequest):
 async def api_characterize(request: CharacterizeRequest):
     try:
         return characterize_files(request.files, request.column_map)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/fit-envelope")
+async def api_fit_envelope(request: EnvelopeRequest):
+    try:
+        frequencies = np.array(request.frequencies)
+        z_real_upper, z_real_lower, z_imag_upper, z_imag_lower = await asyncio.to_thread(
+            compute_fit_envelope,
+            request.circuit_string,
+            request.parameters,
+            request.confidence,
+            frequencies,
+            request.n_samples,
+        )
+        return EnvelopeResponse(
+            z_real_upper=z_real_upper.tolist(),
+            z_real_lower=z_real_lower.tolist(),
+            z_imag_upper=z_imag_upper.tolist(),
+            z_imag_lower=z_imag_lower.tolist(),
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
