@@ -16,6 +16,114 @@ from .file_handler import load_eis_data
 from .models import KKRequest, KKResult
 
 
+def _interp_zero(x0: float, y0: float, x1: float, y1: float) -> float:
+    """Linear interpolation: x where y=0 between two points."""
+    dy = y1 - y0
+    return x0 if abs(dy) < 1e-30 else float(x0 - y0 * (x1 - x0) / dy)
+
+
+def _lf_intercept_from_circle(zr: np.ndarray, yi: np.ndarray) -> float | None:
+    """Fit a circle to the capacitive arc and extrapolate the right-side real-axis intercept.
+
+    Arc selection (HF→LF order):
+    • Ascending side (HF to peak): all points with −Z'' > 0.
+    • Descending side (peak to LF): points where −Z'' > 15 % of peak value.
+      This threshold excludes Warburg/diffusion tail contamination.
+
+    Returns None if fewer than 3 arc points are found, the algebraic fit is degenerate,
+    or the fitted circle does not intersect the real axis.
+    """
+    n = len(yi)
+    if n < 3:
+        return None
+
+    peak_idx = int(np.argmax(yi))
+    peak_val = float(yi[peak_idx])
+    if peak_val <= 0:
+        return None
+
+    # Build the arc point mask.
+    include = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if i <= peak_idx:
+            # Ascending side: include only positive −Z'' (skip inductive HF points).
+            if yi[i] > 0:
+                include[i] = True
+        else:
+            # Descending side: stop as soon as we drop below 15 % of peak or hit zero.
+            if yi[i] <= 0 or yi[i] < 0.15 * peak_val:
+                break
+            include[i] = True
+
+    if include.sum() < 3:
+        return None
+
+    x, y = zr[include], yi[include]
+
+    # Algebraic circle fit: x² + y² + Dx + Ey + F = 0
+    # → centre (−D/2, −E/2), radius = √(D²/4 + E²/4 − F)
+    A = np.column_stack([x, y, np.ones_like(x)])
+    b_vec = -(x ** 2 + y ** 2)
+    try:
+        params, _, rank, _ = np.linalg.lstsq(A, b_vec, rcond=None)
+        if rank < 3:
+            return None
+    except Exception:
+        return None
+
+    D, E, F = params
+    cx = -D / 2.0
+    cy = -E / 2.0
+    r_sq = cx ** 2 + cy ** 2 - F
+
+    if r_sq <= 0:
+        return None
+
+    # Real-axis intersection: (x − cx)² + cy² = r²
+    disc = r_sq - cy ** 2
+    if disc < 0:
+        return None  # circle doesn't reach the real axis
+
+    lf_x = float(cx + np.sqrt(disc))  # right-side intersection
+
+    # Sanity: must be positive and not absurdly large relative to arc extent.
+    if lf_x < 0 or lf_x > float(np.max(x)) * 20:
+        return None
+
+    return lf_x
+
+
+def _find_nyquist_intercepts(
+    frequencies: np.ndarray, Z: np.ndarray
+) -> tuple[float, float | None]:
+    """Find HF and LF real-axis intercepts of a Nyquist curve.
+
+    • HF intercept: linear interpolation to the first upward zero-crossing of −Z''
+      (inductive → capacitive transition). Falls back to the highest-frequency point.
+    • LF intercept: circle fit to the capacitive arc + extrapolation to y = 0.
+      Returns None when no identifiable semicircle is found.
+    """
+    sort_idx = np.argsort(frequencies)[::-1]   # HF first
+    zr = Z.real[sort_idx]
+    yi = -Z.imag[sort_idx]                     # −Z'' > 0 for capacitive arcs
+    n = len(yi)
+
+    # ── HF intercept: scan for first upward zero-crossing ───────────────────────
+    hf_intercept = float(zr[0])
+    for i in range(n - 1):
+        if yi[i] <= 0 < yi[i + 1]:
+            hf_intercept = _interp_zero(zr[i], yi[i], zr[i + 1], yi[i + 1])
+            break
+        if yi[i] > 0:
+            # Data already starts in the capacitive region — use the first point.
+            break
+
+    # ── LF intercept: circle fitting on the arc ──────────────────────────────────
+    lf_intercept = _lf_intercept_from_circle(zr, yi)
+
+    return hf_intercept, lf_intercept
+
+
 def run_kk_single(
     frequencies: np.ndarray,
     Z: np.ndarray,
@@ -44,9 +152,8 @@ def run_kk_single(
         freq_min_s = float(valid_freqs.min())
         freq_max_s = float(valid_freqs.max())
 
-    # HF intercept: Z' at the highest measured frequency ≈ R_s
-    hf_idx = int(np.argmax(frequencies))
-    rs_est = float(Z.real[hf_idx])
+    # Interpolated real-axis intercepts (more accurate than raw endpoint Z').
+    hf_intercept, lf_intercept = _find_nyquist_intercepts(frequencies, Z)
 
     return KKResult(
         success=True,
@@ -61,7 +168,8 @@ def run_kk_single(
         flagged_indices=flagged,
         freq_min_suggest=freq_min_s,
         freq_max_suggest=freq_max_s,
-        rs_estimate=rs_est,
+        rs_estimate=hf_intercept,
+        lf_intercept=lf_intercept,
     )
 
 
