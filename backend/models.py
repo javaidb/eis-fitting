@@ -117,14 +117,27 @@ class DRTRequest(BaseModel):
     lambda_reg: float = 1e-3
 
 
+class DRTSingleRequest(BaseModel):
+    file: FileInfo
+    column_map: ColumnMap
+    lambda_reg: float = 1e-3
+
+
+class LCurveRequest(BaseModel):
+    file: FileInfo
+    column_map: ColumnMap
+
+
 class DRTResult(BaseModel):
     filename: str = ""
+    path: str = ""
     success: bool = False
     error: Optional[str] = None
     log_tau: List[float] = []
     gamma: List[float] = []
     peaks: List[dict] = []
     characterization: Dict[str, Union[float, str]] = {}
+    lambda_used: Optional[float] = None
 
 
 class EnvelopeRequest(BaseModel):
