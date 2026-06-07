@@ -38,7 +38,7 @@ let selectedId  = null;
 let dragState   = null;  // { source: 'palette'|'canvas', element?, nodeId? }
 let ghostEl     = null;
 let activeDZId  = null;
-let dropZones   = [];    // [{id, type, index?, nodeId?, groupId?, x, y, w, h}]
+let dropZones   = [];    // [{id, type, nodeId?, x, y, w, h, mutate?: (newNode) => void}]
 
 let _container, _navigate, _showToast;
 let _elements = [];
@@ -183,14 +183,27 @@ function dropOnComponent(targetId, element) {
   if (existing) makeParallelWith_new(targetId, newComp);
 }
 
+// Search the tree recursively and return { arr, idx } where arr[idx] has the given id.
+// arr is the actual live array (top-level nodes or a branch), so splice on it works directly.
+function findInTree(ns, id) {
+  for (let i = 0; i < ns.length; i++) {
+    if (ns[i].id === id) return { arr: ns, idx: i };
+    if (ns[i].type === 'parallel') {
+      for (const branch of ns[i].branches) {
+        const hit = findInTree(branch, id);
+        if (hit) return hit;
+      }
+    }
+  }
+  return null;
+}
+
 function makeParallelWith_new(existingId, newNode) {
-  saveHistory();
-  const existing = nodes.find(n => n.id === existingId);
-  if (!existing) return;
+  const hit = findInTree(nodes, existingId);
+  if (!hit) return;
+  const existing = hit.arr[hit.idx];
   const pg = { id: newId(), type: 'parallel', branches: [[existing], [newNode]] };
-  const i = nodes.indexOf(existing);
-  nodes = nodes.filter(n => n.id !== existingId);
-  nodes.splice(i, 0, pg);
+  hit.arr.splice(hit.idx, 1, pg);   // replace in the actual parent array, any depth
   selectedId = pg.id;
   renderCircuit(); syncString();
 }
@@ -238,7 +251,7 @@ function renderCircuit() {
   // Terminal wires
   html += `<line class="wire-line" x1="${PAD}" y1="${cy}" x2="${startX}" y2="${cy}"/>`;
 
-  const { html: seriesHtml, endX } = buildSeriesHtml(nodes, startX, cy, counters, true);
+  const { html: seriesHtml, endX } = buildSeriesHtml(nodes, startX, cy, counters);
   html += seriesHtml;
 
   html += `<line class="wire-line" x1="${endX}" y1="${cy}" x2="${endX + WIRE_EXT}" y2="${cy}"/>`;
@@ -290,13 +303,19 @@ function renderCircuit() {
   svg.addEventListener('click', () => { selectedId = null; renderCircuit(); });
 }
 
-// Builds SVG HTML for a series chain and returns endX
-function buildSeriesHtml(ns, startX, cy, counters, isTopLevel) {
+// Builds SVG HTML for a series chain and returns endX.
+// `ns` is the actual live array (top-level `nodes` or a branch array);
+// mutate closures capture it directly so drops into sub-branches work.
+function buildSeriesHtml(ns, startX, cy, counters) {
   let x = startX;
   let html = '';
 
   // Gap drop zone before first element
-  dropZones.push({ id: `gap-0-${startX}`, type: 'gap', index: isTopLevel ? 0 : -1, x: x - 12, y: cy - COMP_H, w: 24, h: COMP_H * 2 });
+  dropZones.push({
+    id: `gap-0-${startX}`, type: 'gap',
+    x: x - 12, y: cy - COMP_H, w: 24, h: COMP_H * 2,
+    mutate: (newNode) => ns.splice(0, 0, newNode),
+  });
 
   for (let i = 0; i < ns.length; i++) {
     const node = ns[i];
@@ -311,16 +330,26 @@ function buildSeriesHtml(ns, startX, cy, counters, isTopLevel) {
     x += size.w;
 
     if (i < ns.length - 1) {
-      // Wire and gap drop zone between elements
+      // Wire and gap drop zone between elements.
+      // `i` is captured per-iteration by `let` — closure is correct.
+      const insertAt = i + 1;
       const gapX = x;
-      dropZones.push({ id: `gap-${i + 1}-${startX}`, type: 'gap', index: isTopLevel ? i + 1 : -1, x: gapX + 2, y: cy - COMP_H, w: H_GAP - 4, h: COMP_H * 2 });
+      dropZones.push({
+        id: `gap-${insertAt}-${startX}`, type: 'gap',
+        x: gapX + 2, y: cy - COMP_H, w: H_GAP - 4, h: COMP_H * 2,
+        mutate: (newNode) => ns.splice(insertAt, 0, newNode),
+      });
       html += `<line class="wire-line" x1="${gapX}" y1="${cy}" x2="${gapX + H_GAP}" y2="${cy}"/>`;
       x += H_GAP;
     }
   }
 
   // Gap drop zone after last element
-  dropZones.push({ id: `gap-end-${startX}`, type: 'gap', index: isTopLevel ? ns.length : -1, x: x + 2, y: cy - COMP_H, w: 22, h: COMP_H * 2 });
+  dropZones.push({
+    id: `gap-end-${startX}`, type: 'gap',
+    x: x + 2, y: cy - COMP_H, w: 22, h: COMP_H * 2,
+    mutate: (newNode) => ns.splice(ns.length, 0, newNode),
+  });
 
   return { html, endX: x };
 }
@@ -384,7 +413,7 @@ function buildParallelHtml(node, x, cy, counters) {
     const branchX    = leftX + BUS_W;
 
     html += `<line class="wire-line" x1="${leftX}" y1="${branchCY}" x2="${branchX}" y2="${branchCY}"/>`;
-    const { html: branchHtml, endX: branchEndX } = buildSeriesHtml(node.branches[i], branchX, branchCY, counters, false);
+    const { html: branchHtml, endX: branchEndX } = buildSeriesHtml(node.branches[i], branchX, branchCY, counters);
     html += branchHtml;
     html += `<line class="wire-line" x1="${branchEndX}" y1="${branchCY}" x2="${rightX}" y2="${branchCY}"/>`;
 
@@ -459,12 +488,10 @@ function onDragEnd(e) {
 
   const dz = getActiveDZ(e.clientX, e.clientY);
   if (dz) {
+    // Single history snapshot for the entire drag operation — before any mutation.
+    saveHistory();
     if (dragState.source === 'canvas') {
-      // Remove the original node first
-      saveHistory();
-      const origId = dragState.nodeId;
-      const origElement = dragState.element;
-      deleteNodeSilent(origId);
+      deleteNodeSilent(dragState.nodeId);
     }
     performDrop(dragState, dz);
   }
@@ -488,14 +515,14 @@ function deleteNodeSilent(id) {
 
 function performDrop(drag, dz) {
   const newNode = { id: newId(), type: 'component', element: drag.element };
-  if (dz.type === 'gap' && dz.index >= 0) {
-    nodes.splice(dz.index, 0, newNode);
+  if (dz.type === 'gap' && dz.mutate) {
+    dz.mutate(newNode);
     selectedId = newNode.id;
+    renderCircuit(); syncString();
   } else if (dz.type === 'on-component') {
     makeParallelWith_new(dz.nodeId, newNode);
-    return; // already calls renderCircuit + syncString
+    // makeParallelWith_new already calls renderCircuit + syncString
   }
-  renderCircuit(); syncString();
 }
 
 function updateDropHighlight(mx, my) {
@@ -568,7 +595,7 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
         } catch (_) {}
       }
 
-      const oc = state.optimizeConfig ?? { enabled: false, rc_min: 1, rc_max: 5, pair_types: ['CPE'], criterion: 'AIC' };
+      const oc = state.optimizeConfig ?? { enabled: false, rc_min: 1, rc_max: 2, pair_types: ['CPE'], criterion: 'AIC' };
       const fitModeVal = oc.enabled ? 'optimize' : 'fixed';
       const hasCPE     = (oc.pair_types ?? ['CPE']).includes('CPE');
       const hasC       = (oc.pair_types ?? []).includes('C');
@@ -637,7 +664,7 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
                 <input type="number" id="rc-min" value="${oc.rc_min ?? 1}" min="0" max="10"
                        style="width:56px;padding:5px 7px;background:var(--surface);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:13px;text-align:right;">
                 <span style="color:var(--text-muted);">to max</span>
-                <input type="number" id="rc-max" value="${oc.rc_max ?? 5}" min="1" max="10"
+                <input type="number" id="rc-max" value="${oc.rc_max ?? 2}" min="1" max="10"
                        style="width:56px;padding:5px 7px;background:var(--surface);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:13px;text-align:right;">
               </div>
             </div>
@@ -771,7 +798,7 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
           const optimizeConfig = {
             enabled: true,
             rc_min:     Math.max(0, parseInt(container.querySelector('#rc-min')?.value) || 1),
-            rc_max:     Math.max(1, parseInt(container.querySelector('#rc-max')?.value) || 5),
+            rc_max:     Math.max(1, parseInt(container.querySelector('#rc-max')?.value) || 2),
             pair_types: pairTypes.length ? pairTypes : ['CPE'],
             criterion:  container.querySelector('input[name="criterion"]:checked')?.value || 'AIC',
             n_restarts: Math.max(1, parseInt(container.querySelector('#n-restarts')?.value) || 1),
