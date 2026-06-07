@@ -5,11 +5,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.drt import drt_batch_stream
+from backend.drt import compute_drt_auto_for_file, compute_drt_for_file, compute_lcurve_for_file, drt_batch_stream
 from backend.file_handler import characterize_files, scan_folder
 from backend.fitting import compute_fit_envelope, fit_batch_stream, get_param_names
 from backend.kk import kk_batch_stream
-from backend.models import CharacterizeRequest, DRTRequest, EnvelopeRequest, EnvelopeResponse, FitRequest, FreqRangeRequest, KKRequest, ParseCircuitRequest, ScanFolderRequest
+from backend.models import CharacterizeRequest, DRTRequest, DRTSingleRequest, EnvelopeRequest, EnvelopeResponse, FitRequest, FreqRangeRequest, KKRequest, LCurveRequest, ParseCircuitRequest, ScanFolderRequest
 
 app = FastAPI(title="EIS Fitting")
 
@@ -170,6 +170,21 @@ async def api_drt(request: DRTRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/drt-single")
+async def api_drt_single(request: DRTSingleRequest):
+    return await compute_drt_for_file(request)
+
+
+@app.post("/api/drt-auto-single")
+async def api_drt_auto_single(request: LCurveRequest):
+    return await compute_drt_auto_for_file(request.file, request.column_map)
+
+
+@app.post("/api/drt-lcurve")
+async def api_drt_lcurve(request: LCurveRequest):
+    return await compute_lcurve_for_file(request)
 
 
 @app.post("/api/kk")
