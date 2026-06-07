@@ -3,6 +3,20 @@ import { characterizeFiles, streamFitting, streamKK } from '../api.js';
 
 const GOOD_THRESHOLD = 0.05;
 
+// Format a display-unit value without unnecessary scientific notation.
+// Plain decimal for |v| in [1e-3, 1e4); scientific outside that range.
+function fmtNum(v) {
+  if (v == null) return '—';
+  const abs = Math.abs(v);
+  if (abs === 0) return '0';
+  if (abs >= 1e-3 && abs < 1e4) {
+    const dp = abs >= 1000 ? 0 : abs >= 100 ? 1 : abs >= 10 ? 2 : abs >= 1 ? 3 : abs >= 0.1 ? 4 : 5;
+    const s = v.toFixed(dp);
+    return s.includes('.') ? s.replace(/\.?0+$/, '') : s;
+  }
+  return v.toExponential(3);
+}
+
 function checkPhysical(name, value) {
   if (/^R\d/.test(name)  && value < 0)          return 'negative resistance';
   if (/^C\d/.test(name)  && value <= 0)          return 'non-positive capacitance';
@@ -40,9 +54,10 @@ function configKey(state) {
     optimize: state.optimizeConfig ?? { enabled: false },
     freqMin:  state.fitFreqMin ?? null,
     freqMax:  state.fitFreqMax ?? null,
-    weight:   state.fitWeighting ?? 'none',
-    solver:   state.fitSolver ?? 'lm',
-    kkData:   state.kkData ?? {},  // per-file ranges change the fit — invalidate cache when KK reruns
+    weight:          state.fitWeighting ?? 'none',
+    solver:          state.fitSolver ?? 'lm',
+    omitInductive:   state.omitInductive ?? false,
+    kkData:          state.kkData ?? {},  // per-file ranges change the fit — invalidate cache when KK reruns
   });
 }
 
@@ -115,8 +130,9 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       if (files[i]) resultMap.set(files[i].path, r);
     });
 
-    const weighting = state.fitWeighting ?? 'none';
-    const solver    = state.fitSolver ?? 'lm';
+    const weighting      = state.fitWeighting ?? 'none';
+    const solver         = state.fitSolver ?? 'lm';
+    const omitInductive  = state.omitInductive ?? false;
 
     container.innerHTML = `
       <div class="section-header">Fit</div>
@@ -195,6 +211,13 @@ export function FittingRunnerView(container, { navigate, showToast }) {
                     <option value="basin_hop"   ${solver === 'basin_hop'   ? 'selected' : ''}>Basin Hopping</option>
                     <option value="nelder_mead" ${solver === 'nelder_mead' ? 'selected' : ''}>Nelder-Mead</option>
                   </select>
+                </label>
+
+                <label class="flow-config-item" style="flex-direction:row;align-items:center;gap:6px;cursor:pointer;"
+                       title="Remove high-frequency inductive points (Z'' > 0) before fitting">
+                  <input type="checkbox" id="omit-inductive-cb" ${omitInductive ? 'checked' : ''}
+                         style="accent-color:var(--accent);width:14px;height:14px;flex-shrink:0;">
+                  <span class="flow-config-label" style="white-space:nowrap;">Omit inductive</span>
                 </label>
               </div>
             </div>
@@ -283,6 +306,9 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     });
     container.querySelector('#solver-select').addEventListener('change', e => {
       setState({ fitSolver: e.target.value });
+    });
+    container.querySelector('#omit-inductive-cb').addEventListener('change', e => {
+      setState({ omitInductive: e.target.checked });
     });
     container.querySelector('#bin-by-select')?.addEventListener('change', e => {
       binByField = e.target.value;
@@ -381,8 +407,12 @@ export function FittingRunnerView(container, { navigate, showToast }) {
 
   function _kkTileHTML(filename, path, safeId, kk) {
     const { cls, label } = kkTileState(kk);
-    const rs = kk.rs_estimate;
-    const rsSub = rs != null ? `<div class="fit-tile-sub">Rs≈${(rs * 1000).toFixed(1)} mΩ</div>` : '';
+    const rs  = kk.rs_estimate;
+    const lf  = kk.lf_intercept;
+    const r1  = rs != null && lf != null ? (lf - rs) * 1000 : null;
+    const rsSub = rs != null
+      ? `<div class="fit-tile-sub">Rs≈${(rs * 1000).toFixed(1)} mΩ${r1 != null ? ` · R₁≈${r1.toFixed(1)} mΩ` : ''}</div>`
+      : '';
     return `<div class="fit-tile ${cls}" data-path="${path}" id="tile-${safeId}">
       <div class="fit-tile-name">${filename}</div>
       <div class="fit-tile-pct">${label}</div>
@@ -462,6 +492,8 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     if (kk.M  != null) metaParts.push(`M = ${kk.M} RC elements`);
     if (kk.mu != null) metaParts.push(`μ = ${kk.mu.toFixed(3)}`);
     if (kk.rs_estimate != null) metaParts.push(`Rs ≈ ${(kk.rs_estimate * 1000).toFixed(2)} mΩ`);
+    if (kk.lf_intercept != null && kk.rs_estimate != null)
+      metaParts.push(`R₁ ≈ ${((kk.lf_intercept - kk.rs_estimate) * 1000).toFixed(2)} mΩ`);
     if (kk.error)      metaParts.push(kk.error);
     metaEl.textContent = metaParts.join(' · ');
 
@@ -496,7 +528,9 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     if (kk.freq_min_suggest != null)
       hints.push(`Freq: ${kk.freq_min_suggest.toPrecision(3)} – ${kk.freq_max_suggest.toPrecision(3)} Hz`);
     if (kk.rs_estimate != null)
-      hints.push(`Rs ≈ ${(kk.rs_estimate * 1000).toFixed(2)} mΩ will seed R0 initial guess`);
+      hints.push(`Rs ≈ ${(kk.rs_estimate * 1000).toFixed(2)} mΩ seeds R0`);
+    if (kk.lf_intercept != null && kk.rs_estimate != null)
+      hints.push(`R₁ ≈ ${((kk.lf_intercept - kk.rs_estimate) * 1000).toFixed(2)} mΩ seeds R1`);
 
     if (hints.length) {
       paramsEl.innerHTML = `
@@ -550,12 +584,77 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       });
     }
 
+    // ── HF / LF real-axis intercept annotations ──────────────────────────────
+    // Sort indices by frequency so we can find the actual HF/LF endpoints.
+    const n = kk.frequencies.length;
+    const sortedByFreq = [...Array(n).keys()].sort((a, b) => kk.frequencies[b] - kk.frequencies[a]);
+    const hfIdx = sortedByFreq[0];          // highest frequency data point
+    const lfIdx = sortedByFreq[n - 1];      // lowest  frequency data point
+
+    const hfX = kk.rs_estimate;             // interpolated HF intercept on real axis
+    const lfX = kk.lf_intercept;            // interpolated LF intercept on real axis
+
+    const hfDataY = -kk.z_imag[hfIdx];     // −Z'' of the HF data endpoint
+    const lfDataY = -kk.z_imag[lfIdx];     // −Z'' of the LF data endpoint
+
+    if (hfX != null) {
+      const hfMΩ = (hfX * 1000).toFixed(2);
+      // Drop-line: from HF data endpoint to the real axis at the HF intercept
+      traces.push({
+        x: [kk.z_real[hfIdx], hfX],
+        y: [hfDataY, 0],
+        mode: 'lines', name: 'HF drop',
+        line: { color: '#4a9ade', width: 1.5, dash: 'dot' },
+        showlegend: false, hoverinfo: 'skip',
+      });
+      // Intercept marker + label on the real axis
+      traces.push({
+        x: [hfX], y: [0],
+        mode: 'markers+text',
+        marker: { color: '#4a9ade', size: 9, symbol: 'diamond',
+                  line: { color: 'rgba(255,255,255,0.6)', width: 1 } },
+        text: [`Rs≈${hfMΩ} mΩ`],
+        textposition: 'top right',
+        textfont: { color: '#4a9ade', size: 10 },
+        name: `Rs ≈ ${hfMΩ} mΩ`,
+        hovertemplate: `HF intercept<br>Rs ≈ ${hfMΩ} mΩ<extra></extra>`,
+        showlegend: true,
+      });
+    }
+
+    if (lfX != null) {
+      const lfMΩ  = (lfX * 1000).toFixed(2);
+      const r1Est = hfX != null ? ((lfX - hfX) * 1000).toFixed(2) : null;
+      const r1Label = r1Est != null ? ` (R₁≈${r1Est} mΩ)` : '';
+      // Drop-line: from LF data endpoint to the real axis at the LF intercept
+      traces.push({
+        x: [kk.z_real[lfIdx], lfX],
+        y: [lfDataY, 0],
+        mode: 'lines', name: 'LF drop',
+        line: { color: '#4a9ade', width: 1.5, dash: 'dot' },
+        showlegend: false, hoverinfo: 'skip',
+      });
+      // Intercept marker + label on the real axis
+      traces.push({
+        x: [lfX], y: [0],
+        mode: 'markers+text',
+        marker: { color: '#4a9ade', size: 9, symbol: 'diamond',
+                  line: { color: 'rgba(255,255,255,0.6)', width: 1 } },
+        text: [`Rs+R₁≈${lfMΩ} mΩ`],
+        textposition: 'top left',
+        textfont: { color: '#4a9ade', size: 10 },
+        name: `Rs+R₁ ≈ ${lfMΩ} mΩ${r1Label}`,
+        hovertemplate: `LF intercept<br>Rs+R₁ ≈ ${lfMΩ} mΩ${r1Label.replace('≈', '≈')}<extra></extra>`,
+        showlegend: true,
+      });
+    }
+
     Plotly.newPlot(el, traces, {
       paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
       margin: { t: 8, r: 16, b: 48, l: 64 },
       font:   { color: '#8892b0', size: 11 },
-      xaxis:  { title: "Z' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: false },
-      yaxis:  { title: "-Z'' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: false, scaleanchor: 'x', scaleratio: 1 },
+      xaxis:  { title: "Z' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: true, zerolinecolor: '#4a5080' },
+      yaxis:  { title: "-Z'' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: true, zerolinecolor: '#4a5080', scaleanchor: 'x', scaleratio: 1 },
       legend: { x: 0.5, y: 0.95, font: { size: 10 } },
       showlegend: true,
     }, { displayModeBar: false, responsive: true });
@@ -634,7 +733,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     paramsEl.innerHTML = Object.entries(result.parameters || {})
       .map(([k, v]) => {
         const { scale, unit } = paramUnitInfo(k);
-        const disp = typeof v === 'number' ? (v * scale).toExponential(3) : v;
+        const disp = typeof v === 'number' ? fmtNum(v * scale) : v;
         const warn = typeof v === 'number' ? checkPhysical(k, v) : null;
         const warnHtml = warn ? ` <span class="param-warn" title="${warn}">⚠</span>` : '';
         return `<span>${k}${warnHtml}</span>${disp}${unit ? ' ' + unit : ''}`;
@@ -646,6 +745,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       { id: 'nyquist',     label: 'Nyquist' },
       { id: 'bode',        label: 'Bode' },
       { id: 'residuals',   label: 'Residuals' },
+      { id: 'parameters',  label: 'Parameters' },
     ];
     if (result.variants_tried?.length > 1)
       tabDefs.push({ id: 'variants', label: `Variants (${result.variants_tried.length})` });
@@ -668,6 +768,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
           const t = btn.dataset.tab;
           if      (t === 'nyquist')     plotNyquist(result, plotEl);
           else if (t === 'bode')        plotBode(result, plotEl);
+          else if (t === 'parameters')  plotParameters(result, plotEl);
           else if (t === 'variants')    plotVariants(result, plotEl);
           else if (t === 'diagnostics') plotDiagnostics(result, plotEl);
           else                          plotResiduals(result, plotEl);
@@ -757,12 +858,16 @@ export function FittingRunnerView(container, { navigate, showToast }) {
   // ── Fitting run ────────────────────────────────────────────────────────────
 
   let _abortCtrl = null;
+  let _viewGen   = 0;   // incremented on every onEnter/onLeave; async callbacks capture
+                        // their value and bail if it has changed (navigated away + back)
+
   function stopFitting() { _abortCtrl?.abort(); }
   function onKeyDown(e) { if (e.key === 'Escape') closeModal(); }
 
   async function runFitting() {
-    const state = getState();
+    const state  = getState();
     if (!state.files?.length || !state.columnMap || !state.circuitConfig) return;
+    const myGen  = _viewGen;   // snapshot — if user leaves and re-enters, _viewGen changes
 
     const runBtn        = container.querySelector('#run-btn');
     const stopBtn       = container.querySelector('#stop-btn');
@@ -782,7 +887,11 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     // Rebuild so KK tiles (if any) are still visible while fit is running
     rebuildGrid();
 
-    const results = [];
+    // Pre-sized array keeps results aligned with filePaths order (important for state reload).
+    // Results arrive out of order with parallel fitting, so we index by path lookup.
+    const resultsByPath = {};
+    const results = new Array(filePaths.length).fill(null);
+    let completedCount = 0;
     let stopped = false, gotDone = false;
 
     const timeout         = parseFloat(container.querySelector('#fit-timeout').value) || 60;
@@ -790,14 +899,16 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     const freqMaxVal      = container.querySelector('#freq-max').value.trim();
     const freqMin         = freqMinVal !== '' ? parseFloat(freqMinVal) : null;
     const freqMax         = freqMaxVal !== '' ? parseFloat(freqMaxVal) : null;
-    const weighting   = container.querySelector('#weighting-select').value;
-    const solver      = container.querySelector('#solver-select').value;
+    const weighting      = container.querySelector('#weighting-select').value;
+    const solver         = container.querySelector('#solver-select').value;
+    const omitInductive  = container.querySelector('#omit-inductive-cb').checked;
     const runCacheKey = configKey({ ...state, fitTimeout: timeout, fitFreqMin: freqMin,
-                                   fitFreqMax: freqMax, fitWeighting: weighting, fitSolver: solver });
+                                   fitFreqMax: freqMax, fitWeighting: weighting, fitSolver: solver,
+                                   omitInductive });
 
     try {
       setState({ fitTimeout: timeout, fitFreqMin: freqMin, fitFreqMax: freqMax,
-                 fitWeighting: weighting, fitSolver: solver });
+                 fitWeighting: weighting, fitSolver: solver, omitInductive });
 
       // Attach per-file KK-derived freq range and Rs estimate to each FileInfo.
       // Per-file values take priority in the backend; global inputs are the fallback.
@@ -822,6 +933,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         freq_max:          freqMax,
         weighting:         weighting,
         solver:            solver,
+        omit_inductive:    omitInductive,
       };
 
       for await (const event of streamFitting(request, _abortCtrl.signal)) {
@@ -831,37 +943,43 @@ export function FittingRunnerView(container, { navigate, showToast }) {
           progressLabel.textContent = `Fitting ${event.file} (${event.index + 1} / ${event.total})`;
         } else if (event.event === 'result') {
           const result = event.data;
-          const path   = filePaths[results.length];
-          results.push(result);
+          const path = result.path;
+          const fileIdx = filePaths.indexOf(path);
+          if (fileIdx >= 0) results[fileIdx] = result;
+          resultsByPath[path] = result;
+          completedCount++;
           resultMap.set(path, result);
           updateFitTile(result, path);
           await new Promise(r => requestAnimationFrame(r));
         } else if (event.event === 'done') {
           gotDone = true;
           progressBar.style.width = '100%';
-          const ok = results.filter(r => r.success).length;
-          progressLabel.textContent = `Done — ${ok}/${results.length} successful`;
+          const ok = results.filter(r => r?.success).length;
+          progressLabel.textContent = `Done — ${ok}/${completedCount} successful`;
         }
       }
     } catch (err) {
       if (err.name === 'AbortError') {
         stopped = true;
-        const ok = results.filter(r => r.success).length;
-        progressLabel.textContent = `Stopped — ${ok}/${results.length} completed`;
+        const ok = results.filter(r => r?.success).length;
+        progressLabel.textContent = `Stopped — ${ok}/${completedCount} completed`;
       } else {
         showToast(`Fitting error: ${err.message}`, 'error');
       }
     } finally {
-      runBtn.disabled  = false;
-      stopBtn.style.display = 'none';
-      nextBtn.disabled = !results.length;
-      _activeView = 'fit';   // tiles now show fit state when grid is rebuilt
+      _activeView = 'fit';
+      const orderedResults = results.filter(r => r !== null);
+      // Always persist results — even if the user navigated away, the data is valuable.
       setState({
-        fitResults:  results,
+        fitResults:  orderedResults,
         fitCacheKey: (!stopped && gotDone) ? runCacheKey : null,
         maxStep:     Math.max(state.maxStep, 7),
       });
-      render();
+      // Only touch the DOM if we are still in the same view session.
+      // If the user left and came back, onEnter already rendered a fresh view;
+      // calling render() here would wipe it. If they're still here, render() will
+      // re-enable the run button and update the tile grid from the saved results.
+      if (_viewGen === myGen) render();
     }
   }
 
@@ -869,18 +987,29 @@ export function FittingRunnerView(container, { navigate, showToast }) {
 
   function plotNyquist(result, el) {
     if (!el || typeof Plotly === 'undefined') return;
-    const traces = [];
+
+    // Use flex column so the toggle row sits below the plot without shrinking it.
+    el.style.display = 'flex';
+    el.style.flexDirection = 'column';
+
+    const plotDiv = document.createElement('div');
+    plotDiv.style.flex = '1';
+    plotDiv.style.minHeight = '0';
+    el.appendChild(plotDiv);
+
+    const baseTraces = [];
     if (result.z_real_data?.length) {
-      traces.push({ x: result.z_real_data, y: result.z_imag_data.map(v => -v),
+      baseTraces.push({ x: result.z_real_data, y: result.z_imag_data.map(v => -v),
         mode: 'markers', type: 'scatter', name: 'Data',
         marker: { color: '#8892b0', size: 5 } });
     }
     if (result.success && result.z_real_fit?.length) {
-      traces.push({ x: result.z_real_fit, y: result.z_imag_fit.map(v => -v),
+      baseTraces.push({ x: result.z_real_fit, y: result.z_imag_fit.map(v => -v),
         mode: 'lines', type: 'scatter', name: 'Fit',
         line: { color: 'var(--accent)', width: 2 } });
     }
-    Plotly.newPlot(el, traces, {
+
+    const layout = {
       paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
       margin: { t: 8, r: 16, b: 48, l: 64 },
       font:   { color: '#8892b0', size: 11 },
@@ -888,7 +1017,66 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       yaxis:  { title: "-Z'' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: false, scaleanchor: 'x', scaleratio: 1 },
       legend: { x: 0.7, y: 0.95, font: { size: 10 } },
       showlegend: true,
-    }, { displayModeBar: false, responsive: true });
+    };
+
+    Plotly.newPlot(plotDiv, baseTraces, layout, { displayModeBar: false, responsive: true });
+
+    // Envelope toggle — only shown when confidence data exists.
+    const hasConf = result.success && result.circuit_used &&
+                    result.frequencies?.length &&
+                    result.confidence && Object.keys(result.confidence).length > 0;
+    if (!hasConf) return;
+
+    const toggleRow = document.createElement('div');
+    toggleRow.style.cssText = 'padding:4px 8px;display:flex;align-items:center;gap:8px;flex-shrink:0;';
+    toggleRow.innerHTML = `
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);cursor:pointer;">
+        <input type="checkbox" id="nq-env-toggle" style="accent-color:var(--accent);">
+        ±1σ envelope
+      </label>
+      <span id="nq-env-status" style="font-size:11px;color:var(--text-muted);"></span>
+    `;
+    el.appendChild(toggleRow);
+
+    toggleRow.querySelector('#nq-env-toggle').addEventListener('change', async function () {
+      const statusEl = toggleRow.querySelector('#nq-env-status');
+      if (!this.checked) {
+        Plotly.react(plotDiv, baseTraces, layout);
+        return;
+      }
+      statusEl.textContent = 'Computing…';
+      try {
+        const resp = await fetch('/api/fit-envelope', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            circuit_string: result.circuit_used,
+            parameters:     result.parameters,
+            confidence:     result.confidence,
+            frequencies:    result.frequencies,
+            n_samples:      200,
+          }),
+        });
+        if (!resp.ok) throw new Error('Envelope computation failed');
+        const env = await resp.json();
+        const envTraces = [
+          // Upper bound (invisible line — acts as the "from" for fill='tonexty')
+          { x: env.z_real_upper, y: env.z_imag_upper.map(v => -v),
+            mode: 'lines', line: { width: 0 }, name: '+1σ', showlegend: false,
+            hoverinfo: 'skip' },
+          // Lower bound filled back to upper
+          { x: env.z_real_lower, y: env.z_imag_lower.map(v => -v),
+            mode: 'lines', fill: 'tonexty', fillcolor: 'rgba(78,205,196,0.15)',
+            line: { width: 0 }, name: '±1σ', showlegend: true,
+            hoverinfo: 'skip' },
+        ];
+        Plotly.react(plotDiv, [...baseTraces, ...envTraces], layout);
+        statusEl.textContent = '';
+      } catch (_) {
+        statusEl.textContent = 'Failed';
+        this.checked = false;
+      }
+    });
   }
 
   function plotBode(result, el) {
@@ -937,76 +1125,208 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     }, { displayModeBar:false, responsive:true });
   }
 
+  function plotParameters(result, el) {
+    if (!result.success) {
+      el.innerHTML = '<p style="color:var(--text-muted);padding:16px 0;">No parameters — fit failed.</p>';
+      return;
+    }
+
+    const names  = result.param_names?.length ? result.param_names : Object.keys(result.parameters || {});
+    const fitted  = result.parameters    || {};
+    const initial = result.initial_guess || {};
+    const conf    = result.confidence    || {};
+
+    const rows = names.map(name => {
+      const { scale, unit } = paramUnitInfo(name);
+
+      const fittedVal  = fitted[name];
+      const initVal    = initial[name];
+      const confVal    = conf[name];
+
+      const fmt = v => v != null ? fmtNum(v * scale) : '—';
+
+      // Relative change from initial to fitted
+      let changePct = null;
+      if (fittedVal != null && initVal != null && Math.abs(initVal) > 1e-30) {
+        changePct = ((fittedVal - initVal) / Math.abs(initVal)) * 100;
+      }
+      const changeStr   = changePct != null ? `${changePct >= 0 ? '+' : ''}${changePct.toFixed(1)}%` : '—';
+      const changeColor = changePct == null           ? 'color:var(--text-muted)'
+                        : Math.abs(changePct) < 20    ? 'color:var(--text-muted)'
+                        : Math.abs(changePct) < 200   ? 'color:var(--warning)'
+                        :                               'color:var(--accent)';
+
+      const warn     = fittedVal != null ? checkPhysical(name, fittedVal) : null;
+      const warnHtml = warn ? ` <span class="param-warn" title="${warn}">⚠</span>` : '';
+
+      // Bar showing relative magnitude of fitted vs initial
+      const barPct = (fittedVal != null && initVal != null && initVal > 0)
+        ? Math.min(200, Math.max(0, (fittedVal / initVal) * 100))
+        : null;
+      const barHtml = barPct != null
+        ? `<div style="position:relative;height:4px;background:var(--surface2);border-radius:2px;width:80px;margin-top:3px;">
+             <div style="position:absolute;left:0;top:0;height:4px;border-radius:2px;
+                         width:${Math.min(barPct, 100)}%;background:var(--accent);opacity:0.7;"></div>
+             ${barPct > 100 ? `<div style="position:absolute;left:50%;top:0;height:4px;width:2px;background:var(--text-muted);"></div>` : ''}
+           </div>`
+        : '';
+
+      return `<tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:7px 10px;font-family:monospace;font-size:12px;color:var(--accent);white-space:nowrap;">${name}${warnHtml}</td>
+        <td style="padding:7px 8px;font-size:11px;color:var(--text-muted);text-align:right;white-space:nowrap;">${unit || '—'}</td>
+        <td style="padding:7px 8px;font-size:12px;color:var(--text-muted);text-align:right;font-family:monospace;">${fmt(initVal)}</td>
+        <td style="padding:7px 8px;font-size:12px;color:var(--text);text-align:right;font-family:monospace;font-weight:600;">${fmt(fittedVal)}</td>
+        <td style="padding:7px 8px;font-size:12px;${changeColor};text-align:right;white-space:nowrap;">${changeStr}</td>
+        <td style="padding:7px 8px;font-size:11px;color:var(--text-muted);text-align:right;font-family:monospace;">${confVal != null ? `±${fmtNum(confVal * scale)}` : '—'}</td>
+        <td style="padding:7px 10px;">${barHtml}</td>
+      </tr>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div style="overflow-x:auto;overflow-y:auto;max-height:320px;">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr style="position:sticky;top:0;background:var(--surface);z-index:1;">
+              <th style="padding:5px 10px;text-align:left;border-bottom:1px solid var(--border);color:var(--text-muted);font-weight:600;">Param</th>
+              <th style="padding:5px 8px;text-align:right;border-bottom:1px solid var(--border);color:var(--text-muted);font-weight:600;">Unit</th>
+              <th style="padding:5px 8px;text-align:right;border-bottom:1px solid var(--border);color:var(--text-muted);font-weight:600;">Initial</th>
+              <th style="padding:5px 8px;text-align:right;border-bottom:1px solid var(--border);color:var(--text-muted);font-weight:600;">Fitted</th>
+              <th style="padding:5px 8px;text-align:right;border-bottom:1px solid var(--border);color:var(--text-muted);font-weight:600;">Δ from init</th>
+              <th style="padding:5px 8px;text-align:right;border-bottom:1px solid var(--border);color:var(--text-muted);font-weight:600;">±1σ</th>
+              <th style="padding:5px 10px;border-bottom:1px solid var(--border);"></th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+
   function plotDiagnostics(result, el) {
     if (!result.success) {
       el.innerHTML = '<p style="color:var(--text-muted);padding:16px 0;">No diagnostics — fit failed.</p>';
       return;
     }
-    const chiNu = result.chi_sq_nu, rmse = result.rmse;
-    const corr  = result.correlation;
-    const names = result.param_names || Object.keys(result.parameters || {});
 
-    let chiClass = '', chiNote = '';
-    if (chiNu != null) {
-      if      (chiNu < 0.5)  { chiClass = 'color:var(--accent)';  chiNote = 'possible overfitting'; }
-      else if (chiNu < 2.0)  { chiClass = 'color:var(--success)'; chiNote = 'good fit'; }
-      else if (chiNu < 10.0) { chiClass = 'color:var(--warning)'; chiNote = 'poor fit'; }
-      else                   { chiClass = 'color:var(--danger)';   chiNote = 'very poor fit'; }
+    const names = result.param_names || Object.keys(result.parameters || {});
+    const conf  = result.confidence  || {};
+    const corr  = result.correlation;
+    const k     = names.length;
+    const N     = result.frequencies?.length ?? 0;
+    const dof   = 2 * N - k;   // 2N because real + imag are separate observations
+
+    // ── Fit quality ───────────────────────────────────────────────────────────
+    const pct = result.residual != null ? result.residual * 100 : null;
+    let qualColor, qualLabel, qualTip;
+    if      (pct == null) { qualColor = 'var(--text-muted)'; qualLabel = '—';          qualTip = ''; }
+    else if (pct < 1)     { qualColor = 'var(--success)';    qualLabel = 'Excellent';  qualTip = 'Circuit matches data very well.'; }
+    else if (pct < 5)     { qualColor = 'var(--success)';    qualLabel = 'Good';       qualTip = 'Fit is within typical EIS noise levels.'; }
+    else if (pct < 10)    { qualColor = 'var(--warning)';    qualLabel = 'Acceptable'; qualTip = 'Some systematic deviation — check Residuals tab.'; }
+    else                  { qualColor = 'var(--danger)';     qualLabel = 'Poor';       qualTip = 'Large deviation — consider a different circuit topology.'; }
+
+    // ── Parameter constraints ─────────────────────────────────────────────────
+    // Full confidence table is in the Parameters tab; here we only flag problems.
+    const hasConf = names.some(n => conf[n] != null);
+    let constraintHTML = '';
+    if (hasConf) {
+      const loose = names.filter(n => {
+        const v = result.parameters[n], s = conf[n];
+        return v != null && s != null && Math.abs(v) > 1e-30 && (s / Math.abs(v)) > 0.5;
+      });
+      if (loose.length) {
+        constraintHTML = `
+          <div class="diag-block">
+            <div class="diag-block-title" style="color:var(--warning);">⚠ Loosely constrained parameters</div>
+            <div class="diag-block-body">
+              ${loose.map(n => `<code style="color:var(--accent)">${n}</code>`).join(', ')}
+              have relative uncertainty &gt;50 %.
+              Consider tightening bounds, removing redundant elements, or running with more restarts.
+              (Full ±1σ values are in the <strong>Parameters</strong> tab.)
+            </div>
+          </div>`;
+      } else {
+        constraintHTML = `
+          <div class="diag-block">
+            <div class="diag-block-title" style="color:var(--success);">✓ All parameters well-constrained</div>
+            <div class="diag-block-body">Every parameter has relative uncertainty &lt;50 %. See the <strong>Parameters</strong> tab for exact ±1σ values.</div>
+          </div>`;
+      }
+    } else {
+      constraintHTML = `
+        <div class="diag-block">
+          <div class="diag-block-title" style="color:var(--text-muted);">Parameter uncertainty unavailable</div>
+          <div class="diag-block-body">The Jacobian was singular or the solver doesn't produce a covariance estimate (Diff. Evo., Basin Hopping). Re-run with LM for uncertainty data.</div>
+        </div>`;
     }
 
+    // ── Correlation alerts ────────────────────────────────────────────────────
     let corrHTML = '';
-    if (corr && names.length) {
-      const cell = (v, i, j) => {
-        if (i === j) return 'background:rgba(78,205,196,0.15);color:var(--text);';
-        const a = Math.abs(v);
-        if (a > 0.9) return 'background:rgba(224,92,92,0.45);color:#fff;font-weight:600;';
-        if (a > 0.7) return 'background:rgba(224,92,92,0.20);color:var(--text);';
-        return 'color:var(--text-muted);';
-      };
-      corrHTML = `
-        <div style="margin-top:16px;">
-          <div style="font-size:12px;font-weight:600;margin-bottom:6px;">
-            Parameter Correlation Matrix
-            <span style="font-weight:400;color:var(--text-muted);"> — red = |r| &gt; 0.9 (degenerate pair)</span>
-          </div>
-          <div style="overflow-x:auto;">
-            <table style="border-collapse:collapse;font-size:11px;">
-              <thead><tr>
-                <th style="padding:4px 8px;"></th>
-                ${names.map(n => `<th style="padding:4px 8px;color:var(--text-muted);font-weight:600;white-space:nowrap;">${n}</th>`).join('')}
-              </tr></thead>
-              <tbody>
-                ${corr.map((row, i) => `<tr>
-                  <td style="padding:4px 8px;color:var(--text-muted);font-weight:600;white-space:nowrap;">${names[i]}</td>
-                  ${row.map((v, j) => `<td style="padding:4px 8px;text-align:right;border-radius:3px;${cell(v,i,j)}">${v.toFixed(3)}</td>`).join('')}
-                </tr>`).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>`;
-    } else {
-      corrHTML = `<p style="font-size:12px;color:var(--text-muted);margin-top:12px;">Correlation matrix not available (singular Jacobian).</p>`;
+    if (corr && names.length >= 2) {
+      const pairs = [];
+      for (let i = 0; i < names.length; i++) {
+        for (let j = i + 1; j < names.length; j++) {
+          const r = corr[i][j];
+          if (Math.abs(r) >= 0.7) pairs.push({ a: names[i], b: names[j], r });
+        }
+      }
+      pairs.sort((x, y) => Math.abs(y.r) - Math.abs(x.r));
+
+      if (pairs.length) {
+        const rows = pairs.map(({ a, b, r }) => {
+          const abs  = Math.abs(r);
+          const col  = abs >= 0.9 ? 'var(--danger)' : 'var(--warning)';
+          const note = abs >= 0.9
+            ? 'very high — optimizer trades one against the other; consider removing one'
+            : 'notable — monitor across spectra';
+          return `<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12px;flex-wrap:wrap;">
+            <code style="color:var(--accent);white-space:nowrap;">${a} ↔ ${b}</code>
+            <span style="font-weight:700;color:${col};">${r >= 0 ? '+' : ''}${r.toFixed(2)}</span>
+            <span style="color:var(--text-muted);font-size:11px;">${note}</span>
+          </div>`;
+        }).join('');
+
+        corrHTML = `
+          <div class="diag-block">
+            <div class="diag-block-title" style="color:${pairs.some(p => Math.abs(p.r) >= 0.9) ? 'var(--danger)' : 'var(--warning)'};">
+              ${pairs.length === 1 ? '1 correlated parameter pair' : `${pairs.length} correlated parameter pairs`}
+            </div>
+            <div class="diag-block-body" style="margin-bottom:8px;">
+              High correlation (|r| ≥ 0.9) means the circuit has more parameters than the data can independently resolve.
+              Try simplifying the model or running Auto-Optimize.
+            </div>
+            ${rows}
+          </div>`;
+      } else {
+        corrHTML = `
+          <div class="diag-block">
+            <div class="diag-block-title" style="color:var(--success);">✓ Parameters independently identifiable</div>
+            <div class="diag-block-body">No strongly correlated pairs (all |r| &lt; 0.7). Each parameter describes a distinct feature of the spectrum.</div>
+          </div>`;
+      }
     }
 
     el.innerHTML = `
-      <div style="padding:8px 0;">
-        <div style="display:flex;gap:32px;flex-wrap:wrap;">
+      <div style="padding:8px 0;display:flex;flex-direction:column;gap:14px;">
+
+        <!-- Fit quality headline -->
+        <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
+          <div style="font-size:32px;font-weight:700;color:${qualColor};line-height:1;">${pct != null ? pct.toFixed(2) + '%' : '—'}</div>
           <div>
-            <div style="font-size:12px;color:var(--text-muted);">Reduced χ²</div>
-            <div style="font-size:22px;font-weight:600;${chiClass}">${chiNu != null ? chiNu.toFixed(3) : '—'}</div>
-            ${chiNote ? `<div style="font-size:11px;color:var(--text-muted);">${chiNote}</div>` : ''}
-          </div>
-          <div>
-            <div style="font-size:12px;color:var(--text-muted);">RMSE</div>
-            <div style="font-size:22px;font-weight:600;color:var(--text);">${rmse != null ? rmse.toExponential(3) + ' Ω' : '—'}</div>
-          </div>
-          <div>
-            <div style="font-size:12px;color:var(--text-muted);">AIC / BIC</div>
-            <div style="font-size:16px;font-weight:600;color:var(--text);">${result.aic != null ? result.aic.toFixed(1) : '—'} / ${result.bic != null ? result.bic.toFixed(1) : '—'}</div>
+            <div style="font-size:14px;font-weight:600;color:${qualColor};">${qualLabel}</div>
+            <div style="font-size:11px;color:var(--text-muted);">mean relative residual${qualTip ? ' — ' + qualTip : ''}</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">${k} param${k !== 1 ? 's' : ''} · ${N} freq. points · ${dof} degrees of freedom</div>
           </div>
         </div>
+
+        ${constraintHTML}
         ${corrHTML}
-      </div>`;
+
+      </div>
+
+      <style>
+        .diag-block { padding:10px 12px;border-radius:6px;background:var(--surface); }
+        .diag-block-title { font-size:12px;font-weight:600;margin-bottom:4px; }
+        .diag-block-body  { font-size:12px;color:var(--text-muted);line-height:1.5; }
+      </style>`;
   }
 
   function plotVariants(result, el) {
@@ -1058,8 +1378,13 @@ export function FittingRunnerView(container, { navigate, showToast }) {
 
   return {
     async onEnter() {
-      render();
+      const myGen = ++_viewGen;   // new session — invalidates any stale callbacks
+
+      // Idempotent: remove first so repeated onEnter calls never stack listeners.
+      document.removeEventListener('keydown', onKeyDown);
       document.addEventListener('keydown', onKeyDown);
+
+      render();
 
       const s = getState();
 
@@ -1070,7 +1395,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ path: s.files[0].path, frequency_column: s.columnMap.frequency }),
           });
-          if (res.ok) {
+          if (res.ok && _viewGen === myGen) {
             const { freq_min, freq_max } = await res.json();
             const minEl = container.querySelector('#freq-min');
             const maxEl = container.querySelector('#freq-max');
@@ -1086,6 +1411,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
             files: s.files,
             column_map: { ...s.columnMap, decimal_places: s.charDecimalPlaces ?? {} },
           });
+          if (_viewGen !== myGen) return;   // navigated away during the fetch — drop it
           charMap.clear();
           for (const { path, characterization } of data) charMap.set(path, characterization);
           if (!binByField) {
@@ -1097,6 +1423,8 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       }
     },
     onLeave() {
+      ++_viewGen;              // invalidate all pending async callbacks from this session
+      _abortCtrl?.abort();     // stop any in-progress fit
       document.removeEventListener('keydown', onKeyDown);
     },
   };
