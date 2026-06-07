@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import os
 import re
 from typing import AsyncGenerator, Dict, List, Optional, Union
 
@@ -598,6 +599,7 @@ def fit_single(
                     path=filepath,
                     success=True,
                     parameters=params,
+                    initial_guess=dict(zip(param_names, initials)),
                     param_names=param_names,
                     confidence=conf,
                     frequencies=frequencies.tolist(),
@@ -641,62 +643,137 @@ def fit_single(
     )
 
 
+def compute_fit_envelope(
+    circuit_string: str,
+    parameters: Dict[str, float],
+    confidence: Dict[str, float],
+    frequencies: np.ndarray,
+    n_samples: int = 200,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Monte Carlo ±1σ envelope: sample parameters ~N(μ, σ), collect Z spread.
+
+    Returns (z_real_upper, z_real_lower, z_imag_upper, z_imag_lower) as 84th/16th
+    percentiles across samples (≈ ±1σ for a Gaussian distribution).
+    """
+    param_names = list(parameters.keys())
+    p0 = np.array([parameters[n] for n in param_names])
+    sigma = np.array([max(confidence.get(n, 0.0), 0.0) for n in param_names])
+
+    n_params = count_circuit_params(circuit_string)
+    c = CustomCircuit(circuit=circuit_string, initial_guess=[1.0] * n_params)
+
+    rng = np.random.default_rng(42)
+    z_real_samples: list[np.ndarray] = []
+    z_imag_samples: list[np.ndarray] = []
+
+    for _ in range(n_samples):
+        sample = rng.normal(p0, np.where(sigma > 0, sigma, 1e-30))
+        sample = np.maximum(sample, 1e-30)
+        try:
+            c.parameters_ = sample
+            Z = c.predict(frequencies)
+            z_real_samples.append(Z.real)
+            z_imag_samples.append(Z.imag)
+        except Exception:
+            continue
+
+    if not z_real_samples:
+        c.parameters_ = p0
+        Z = c.predict(frequencies)
+        return Z.real, Z.real, Z.imag, Z.imag
+
+    z_real_arr = np.array(z_real_samples)
+    z_imag_arr = np.array(z_imag_samples)
+    return (
+        np.percentile(z_real_arr, 84, axis=0),
+        np.percentile(z_real_arr, 16, axis=0),
+        np.percentile(z_imag_arr, 84, axis=0),
+        np.percentile(z_imag_arr, 16, axis=0),
+    )
+
+
 async def fit_batch_stream(request: FitRequest) -> AsyncGenerator[str, None]:
     total = len(request.files)
+    if total == 0:
+        yield f"data: {json.dumps({'event': 'done'})}\n\n"
+        return
 
-    for i, file_info in enumerate(request.files):
-        yield f"data: {json.dumps({'event': 'progress', 'file': file_info.filename, 'index': i, 'total': total})}\n\n"
+    n_workers = min(os.cpu_count() or 4, 8, total)
+    sem = asyncio.Semaphore(n_workers)
+    queue: asyncio.Queue[str] = asyncio.Queue()
 
-        try:
-            frequencies, Z, char_values = await asyncio.to_thread(
-                load_eis_data, file_info.path, request.column_map
+    async def _process_one(i: int, file_info) -> None:
+        async with sem:
+            queue.put_nowait(
+                json.dumps({'event': 'progress', 'file': file_info.filename, 'index': i, 'total': total})
+            )
+            try:
+                frequencies, Z, char_values = await asyncio.to_thread(
+                    load_eis_data, file_info.path, request.column_map
+                )
+
+                # Per-file freq range (from KK suggestion) takes priority over global range
+                f_min = file_info.freq_min if file_info.freq_min is not None else request.freq_min
+                f_max = file_info.freq_max if file_info.freq_max is not None else request.freq_max
+
+                mask = np.ones(len(frequencies), dtype=bool)
+                if f_min is not None:
+                    mask &= frequencies >= f_min
+                if f_max is not None:
+                    mask &= frequencies <= f_max
+                if not mask.all():
+                    if not mask.any():
+                        raise ValueError(
+                            f"No data points remain after applying frequency range "
+                            f"{f_min}–{f_max} Hz"
+                        )
+                    frequencies = frequencies[mask]
+                    Z = Z[mask]
+
+                if request.omit_inductive:
+                    inductive_mask = Z.imag <= 0
+                    if inductive_mask.any():
+                        frequencies = frequencies[inductive_mask]
+                        Z = Z[inductive_mask]
+
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        fit_single,
+                        frequencies, Z,
+                        request.circuit_config,
+                        char_values,
+                        file_info.filename,
+                        file_info.path,
+                        request.optimize_config,
+                        request.column_map,
+                        request.weighting,
+                        request.solver,
+                        file_info.rs_estimate,
+                    ),
+                    timeout=request.fit_timeout,
+                )
+            except asyncio.TimeoutError:
+                result = FitResult(
+                    filename=file_info.filename, path=file_info.path,
+                    success=False, error=f"Fit timed out after {request.fit_timeout:g} s",
+                )
+            except Exception as exc:
+                result = FitResult(
+                    filename=file_info.filename, path=file_info.path,
+                    success=False, error=str(exc),
+                )
+            queue.put_nowait(
+                json.dumps({'event': 'result', 'data': result.model_dump()})
             )
 
-            # Per-file freq range (from KK suggestion) takes priority over global range
-            f_min = file_info.freq_min if file_info.freq_min is not None else request.freq_min
-            f_max = file_info.freq_max if file_info.freq_max is not None else request.freq_max
+    tasks = [asyncio.create_task(_process_one(i, fi)) for i, fi in enumerate(request.files)]
 
-            mask = np.ones(len(frequencies), dtype=bool)
-            if f_min is not None:
-                mask &= frequencies >= f_min
-            if f_max is not None:
-                mask &= frequencies <= f_max
-            if not mask.all():
-                if not mask.any():
-                    raise ValueError(
-                        f"No data points remain after applying frequency range "
-                        f"{f_min}–{f_max} Hz"
-                    )
-                frequencies = frequencies[mask]
-                Z = Z[mask]
+    results_done = 0
+    while results_done < total:
+        msg = await queue.get()
+        yield f"data: {msg}\n\n"
+        if json.loads(msg)['event'] == 'result':
+            results_done += 1
 
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    fit_single,
-                    frequencies, Z,
-                    request.circuit_config,
-                    char_values,
-                    file_info.filename,
-                    file_info.path,
-                    request.optimize_config,
-                    request.column_map,
-                    request.weighting,
-                    request.solver,
-                    file_info.rs_estimate,
-                ),
-                timeout=request.fit_timeout,
-            )
-        except asyncio.TimeoutError:
-            result = FitResult(
-                filename=file_info.filename, path=file_info.path,
-                success=False, error=f"Fit timed out after {request.fit_timeout:g} s",
-            )
-        except Exception as exc:
-            result = FitResult(
-                filename=file_info.filename, path=file_info.path,
-                success=False, error=str(exc),
-            )
-
-        yield f"data: {json.dumps({'event': 'result', 'data': result.model_dump()})}\n\n"
-
+    await asyncio.gather(*tasks, return_exceptions=True)
     yield f"data: {json.dumps({'event': 'done'})}\n\n"
