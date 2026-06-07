@@ -911,6 +911,469 @@ select option { background: var(--surface2); }
 .drt-table tbody tr:hover { background: var(--surface2); }
 
 /* ───────────────────────────────────────────
+   DRT Tuning Lab
+─────────────────────────────────────────── */
+.drt-lab {
+  display: flex;
+  gap: 14px;
+  margin-top: 4px;
+  height: calc(100vh - 230px);
+  min-height: 420px;
+}
+
+.drt-lab-left {
+  flex: 0 0 auto;
+  min-width: 220px;
+  max-width: 55%;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.drt-lab-right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  overflow: hidden;
+}
+
+.drt-panel-title {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  padding: 9px 12px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+}
+
+.drt-file-scroll {
+  flex: 0 0 45%;
+  min-height: 60px;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+/* ── Peak-distribution stats panel ── */
+.drt-stats-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.drt-stats-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+}
+
+.drt-stats-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+
+.drt-stats-select {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.drt-stats-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+.drt-stats-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 20px 12px;
+  text-align: center;
+}
+
+.drt-stats-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.drt-stats-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface2);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 5px 8px;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.drt-stats-table thead th:first-child,
+.drt-stats-table thead th:nth-child(2) { text-align: left; }
+
+.drt-stats-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+.drt-stats-key {
+  color: var(--text);
+  font-weight: 500;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.drt-stats-n {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-align: left;
+  padding-right: 12px;
+}
+
+.drt-stats-pkcol { text-align: right !important; }
+
+.drt-stats-cell {
+  text-align: right;
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.drt-file-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.drt-file-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface2);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.drt-file-row {
+  cursor: pointer;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  transition: background 0.1s;
+}
+
+.drt-file-row:hover  { background: var(--surface2); }
+.drt-file-row.selected { background: var(--accent-dim); }
+.drt-file-row.selected .drt-fname { color: var(--accent); }
+
+.drt-file-row td {
+  padding: 7px 10px;
+  color: var(--text);
+  vertical-align: middle;
+}
+
+.drt-fname {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drt-fcell {
+  white-space: nowrap;
+  color: var(--text-muted) !important;
+}
+
+.drt-flambda {
+  white-space: nowrap;
+  font-size: 11px;
+  font-family: monospace;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.drt-fstatus {
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+/* Right panel — empty hint */
+.drt-empty-hint {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 32px;
+  line-height: 1.6;
+}
+
+/* Selected file header */
+.drt-selected-file-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-bottom: 14px;
+}
+
+/* Auto-λ button */
+.drt-auto-btn {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  font-size: 11px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.drt-auto-btn:hover  { color: var(--accent); border-color: var(--accent); }
+.drt-auto-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* Lambda slider row */
+.drt-lambda-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.drt-lambda-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+#drt-lambda-slider {
+  flex: 1;
+  accent-color: var(--accent);
+  cursor: pointer;
+  height: 4px;
+}
+
+.drt-lambda-val {
+  font-size: 13px;
+  font-family: monospace;
+  color: var(--accent);
+  min-width: 64px;
+  text-align: right;
+}
+
+/* Spinner row */
+.drt-spinner-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 6px 0;
+}
+
+.drt-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: drt-spin 0.65s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes drt-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Spectrum plot area */
+.drt-spectrum-plot {
+  flex: 1;
+  min-height: 160px;
+  margin-bottom: 14px;
+}
+
+/* Placeholder (loading / error state) */
+.drt-plot-placeholder {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+
+/* Peaks summary — max-height so it scrolls rather than pushing the plot */
+#drt-peaks-summary {
+  flex-shrink: 0;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.drt-peaks-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  margin-bottom: 6px;
+}
+
+.drt-peaks-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.drt-peaks-table th {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.drt-peaks-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+.drt-peaks-table tbody tr:last-child td { border-bottom: none; }
+
+/* Quality hint */
+.drt-quality-hint {
+  font-size: 11px;
+  padding: 5px 9px;
+  border-radius: 4px;
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+.drt-hint-warn {
+  background: rgba(230, 126, 34, 0.12);
+  color: var(--warning, #e67e22);
+  border-left: 3px solid var(--warning, #e67e22);
+}
+
+/* L-curve section */
+.drt-lcurve-section {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  background: var(--surface2);
+}
+
+.drt-lcurve-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.drt-lcurve-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.drt-lcurve-info {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.drt-lcurve-lambda {
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.drt-lcurve-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-weight: 600;
+  letter-spacing: .03em;
+}
+
+.drt-icon-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.drt-icon-btn:hover { color: var(--text); background: var(--surface3); }
+
+.drt-lcurve-plot {
+  height: 140px;
+}
+
+/* ───────────────────────────────────────────
    Trends
 ─────────────────────────────────────────── */
 .trends-controls {
