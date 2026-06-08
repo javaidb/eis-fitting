@@ -138,6 +138,7 @@ class DRTResult(BaseModel):
     peaks: List[dict] = []
     characterization: Dict[str, Union[float, str]] = {}
     lambda_used: Optional[float] = None
+    lambda_variants: List[dict] = []  # [{lambda_val, gamma}] for ±1,2 OOM stability overlay
 
 
 class EnvelopeRequest(BaseModel):
