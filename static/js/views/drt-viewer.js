@@ -25,6 +25,15 @@ function fmtTau(tau) {
   return `${tau.toFixed(3)} s`;
 }
 
+function fmtFreq(hz) {
+  if (hz == null) return '—';
+  if (hz >= 1e6)  return `${(hz / 1e6).toFixed(2)} MHz`;
+  if (hz >= 1e3)  return `${(hz / 1e3).toFixed(1)} kHz`;
+  if (hz >= 1)    return `${hz.toFixed(1)} Hz`;
+  if (hz >= 1e-3) return `${(hz * 1e3).toFixed(1)} mHz`;
+  return `${(hz * 1e6).toFixed(1)} µHz`;
+}
+
 function fmtLambda(lambda) {
   if (lambda == null) return '—';
   if (lambda >= 0.1)  return lambda.toFixed(3);
@@ -684,11 +693,30 @@ export function DRTView(container, { navigate, showToast }) {
     const el = container.querySelector('#drt-spectrum-plot');
     if (!el || typeof Plotly === 'undefined') return;
 
-    const traces = [{
-      x: result.log_tau, y: result.gamma,
-      mode: 'lines', type: 'scatter', name: 'γ(τ)',
-      line: { color: 'var(--accent)', width: 2 },
-    }];
+    // Faded overlay traces for ±1,2 OOM λ variants (rendered below main trace)
+    const VARIANT_STYLES = [
+      { color: 'rgba(74,154,222,0.22)',  label: 'λ/100' },
+      { color: 'rgba(74,154,222,0.38)',  label: 'λ/10'  },
+      { color: 'rgba(230,126,34,0.38)',  label: 'λ×10'  },
+      { color: 'rgba(230,126,34,0.22)',  label: 'λ×100' },
+    ];
+    const variantTraces = (result.lambda_variants || []).map((v, i) => ({
+      x: result.log_tau, y: v.gamma,
+      mode: 'lines', type: 'scatter',
+      name: VARIANT_STYLES[i]?.label ?? `v${i}`,
+      line: { color: VARIANT_STYLES[i]?.color ?? 'rgba(128,128,128,0.3)', width: 1.2 },
+      showlegend: false,
+      hoverinfo: 'skip',
+    }));
+
+    const traces = [
+      ...variantTraces,
+      {
+        x: result.log_tau, y: result.gamma,
+        mode: 'lines', type: 'scatter', name: 'γ(τ)',
+        line: { color: 'var(--accent)', width: 2 },
+      },
+    ];
 
     (result.peaks || []).forEach((p, i) => {
       const color  = PEAK_COLORS[i % PEAK_COLORS.length];
@@ -734,28 +762,63 @@ export function DRTView(container, { navigate, showToast }) {
   }
 
   // ── Peaks summary ─────────────────────────────────────────────
+  // Dots: bit0=λ/100 (blue), bit1=λ/10 (light blue), bit2=λ×10 (teal), bit3=λ×100 (green)
+  // Blue = only at lower λ (less reliable); green = survives higher regularisation (confirmed)
+  function stabDotsHtml(peak) {
+    const DOT_COLORS = ['#4a9ade', '#7ab9e8', '#5ec49e', '#27ae60'];
+    const DOT_LABELS = ['λ/100', 'λ/10', 'λ×10', 'λ×100'];
+    const mask = peak.stability_mask;
+    if (mask != null) {
+      return [0, 1, 2, 3].map(i => {
+        const on = mask & (1 << i);
+        return `<span style="color:${on ? DOT_COLORS[i] : '#2d3147'};font-size:10px;" title="${DOT_LABELS[i]}: ${on ? '✓' : '✗'}">●</span>`;
+      }).join('');
+    }
+    // Fallback: old cached result with stability_count only
+    const count = peak.stability_count ?? 0;
+    return [0, 1, 2, 3].map((_, i) =>
+      `<span style="color:${i < count ? DOT_COLORS[i] : '#2d3147'};font-size:10px;">●</span>`
+    ).join('');
+  }
+
   function buildPeaksHtml(result) {
     if (!result.peaks?.length) {
       return `<div style="font-size:12px;color:var(--text-muted);padding:8px 0;">No peaks detected.</div>`;
     }
+    const hasEnrich = result.peaks[0]?.freq_center != null;
     const rows = result.peaks.map((p, i) => {
       const color   = PEAK_COLORS[i % PEAK_COLORS.length];
       const mech    = categorizePeak(p);
       const r2color = p.r2 >= 0.9 ? 'var(--success)' : p.r2 >= 0.7 ? 'var(--warning)' : 'var(--danger)';
+      const mc = p._merged_count ?? 1;
+      const mergedBadge = mc > 1
+        ? `<span style="font-size:8px;color:var(--text-dim);vertical-align:super;margin-left:1px;">×${mc}</span>`
+        : '';
+      const enrichCells = hasEnrich ? `
+          <td style="font-family:monospace;color:var(--text-muted);">${fmtFreq(p.freq_center)}</td>
+          <td title="λ variants: blue=low, green=high regularisation">${stabDotsHtml(p)}</td>
+          <td>${p.re_im_confirmed
+            ? `<span style="color:var(--success);font-size:10px;font-weight:600;" title="Confirmed in real-part DRT">✓</span>`
+            : `<span style="color:var(--text-dim);font-size:10px;" title="Imaginary-only">—</span>`}</td>` : '';
       return `
         <tr>
-          <td style="color:${color};font-weight:600;">${i + 1}</td>
+          <td style="color:${color};font-weight:600;">${i + 1}${mergedBadge}</td>
           <td style="font-family:monospace;">${fmtTau(p.tau_center)}</td>
+          ${enrichCells}
           <td style="color:var(--text-muted);">${mech.label}</td>
           <td style="color:${r2color};">${(p.r2 * 100).toFixed(0)}%</td>
           <td style="color:var(--text-muted);">σ = ${p.sigma.toFixed(2)}</td>
         </tr>`;
     }).join('');
 
+    const enrichHeaders = hasEnrich
+      ? `<th class="drt-fcell" title="Characteristic frequency">f_c</th><th title="Blue=low-λ only, green=survives higher λ">Stable</th><th title="Re+Im check">✓</th>`
+      : '';
+
     return `
       <div class="drt-peaks-label">Detected Peaks</div>
       <table class="drt-peaks-table">
-        <thead><tr><th>#</th><th>τ</th><th>Process</th><th>R²</th><th>Width</th></tr></thead>
+        <thead><tr><th>#</th><th>τ</th>${enrichHeaders}<th>Process</th><th>R²</th><th>Width</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
   }
