@@ -71,6 +71,70 @@ def detect_column_roles(columns: List[str]) -> Dict[str, str]:
     return roles
 
 
+def _column_value(series: pd.Series, decimals: Union[int, None]) -> Union[float, str, None]:
+    """Reduce a characterization column to a single value.
+
+    Numeric columns: mean of all numeric values, rounded only when the user
+    specified a decimal count for this label (used to bin near-identical
+    conditions).  No forced rounding otherwise — a 3.742 V OCV must not
+    silently become 3.7.
+    Non-numeric columns: first non-empty string.
+    """
+    numeric_vals = pd.to_numeric(series, errors="coerce").dropna()
+    if len(numeric_vals):
+        mean_val = float(numeric_vals.mean())
+        return round(mean_val, decimals) if decimals is not None else mean_val
+    non_empty = series.dropna().astype(str).str.strip()
+    non_empty = non_empty[non_empty != ""]
+    if len(non_empty):
+        return non_empty.iloc[0]
+    return None
+
+
+def _extract_char_values(
+    df: pd.DataFrame,
+    filepath: str,
+    column_map: ColumnMap,
+) -> Dict[str, Union[float, str]]:
+    """Extract characterization values for one file (shared by load & characterize)."""
+    battery_id_str = Path(filepath).parent.name or None
+
+    # Process all labels: union of global and per-battery characterization keys.
+    pb_char = column_map.per_battery_characterization or {}
+    all_labels = list(column_map.characterization.keys()) + [
+        lbl for lbl in pb_char if lbl not in column_map.characterization
+    ]
+
+    char_values: Dict[str, Union[float, str]] = {}
+    for label in all_labels:
+        # Per-battery override takes precedence over global mapping.
+        col_name = column_map.characterization.get(label, '')
+        if battery_id_str and label in pb_char:
+            col_name = pb_char[label].get(battery_id_str, col_name)
+
+        if not col_name or col_name not in df.columns:
+            continue
+
+        value = _column_value(df[col_name], column_map.decimal_places.get(label))
+        if value is not None:
+            char_values[label] = value
+
+    # Fallback: if an identifier-like column exists but was not mapped,
+    # extract it automatically so Trends can still expose it.
+    if "identifier" not in char_values:
+        id_col = next((c for c in df.columns if _ROLE_PATTERNS["identifier"].search(str(c))), None)
+        if id_col is not None:
+            value = _column_value(df[id_col], None)
+            if value is not None:
+                char_values["identifier"] = value
+
+    # Inject battery_id as the folder name string.
+    if battery_id_str:
+        char_values["battery_id"] = battery_id_str
+
+    return char_values
+
+
 def load_eis_data(
     filepath: str,
     column_map: ColumnMap,
@@ -92,63 +156,7 @@ def load_eis_data(
     frequencies = frequencies[mask]
     Z = Z[mask]
 
-    # Use the actual parent folder name as the battery identifier.
-    battery_id_str = Path(filepath).parent.name or None
-
-    # Process all labels: union of global and per-battery characterization keys.
-    pb_char = column_map.per_battery_characterization or {}
-    all_labels = list(column_map.characterization.keys()) + [
-        lbl for lbl in pb_char if lbl not in column_map.characterization
-    ]
-
-    char_values: Dict[str, Union[float, str]] = {}
-    for label in all_labels:
-        # Per-battery override takes precedence over global mapping.
-        col_name = column_map.characterization.get(label, '')
-        if battery_id_str and label in pb_char:
-            col_name = pb_char[label].get(battery_id_str, col_name)
-
-        if not col_name or col_name not in df.columns:
-            continue
-
-        series = df[col_name]
-
-        # Numeric characterization columns: optionally round to specified decimals,
-        # then average all numeric values, then round final average to 1 decimal place.
-        numeric_vals = pd.to_numeric(series, errors="coerce").dropna()
-        if len(numeric_vals):
-            # Apply per-parameter decimal rounding if specified
-            decimals = column_map.decimal_places.get(label, None)
-            if decimals is not None:
-                numeric_vals = numeric_vals.round(decimals)
-            # Average and round final result to 1 decimal
-            char_values[label] = round(float(numeric_vals.mean()), 1)
-            continue
-
-        # Non-numeric characterization columns: use the first non-empty value.
-        non_empty = series.dropna().astype(str).str.strip()
-        non_empty = non_empty[non_empty != ""]
-        if len(non_empty):
-            char_values[label] = non_empty.iloc[0]
-
-    # Fallback: if an identifier-like column exists but was not mapped,
-    # extract it automatically so Trends can still expose it.
-    if "identifier" not in char_values:
-        id_col = next((c for c in df.columns if _ROLE_PATTERNS["identifier"].search(str(c))), None)
-        if id_col is not None:
-            series = df[id_col]
-            numeric_vals = pd.to_numeric(series, errors="coerce").dropna()
-            if len(numeric_vals):
-                char_values["identifier"] = round(float(numeric_vals.mean()), 1)
-            else:
-                non_empty = series.dropna().astype(str).str.strip()
-                non_empty = non_empty[non_empty != ""]
-                if len(non_empty):
-                    char_values["identifier"] = non_empty.iloc[0]
-
-    # Inject battery_id as the folder name string.
-    if battery_id_str:
-        char_values["battery_id"] = battery_id_str
+    char_values = _extract_char_values(df, filepath, column_map)
 
     return frequencies, Z, char_values
 
@@ -158,44 +166,7 @@ def characterize_files(files, column_map) -> list:
     for f in files:
         try:
             df = pd.read_csv(f.path)
-            battery_id_str = Path(f.path).parent.name or None
-            pb_char = column_map.per_battery_characterization or {}
-            all_labels = list(column_map.characterization.keys()) + [
-                lbl for lbl in pb_char if lbl not in column_map.characterization
-            ]
-            char_values: Dict[str, Union[float, str]] = {}
-            for label in all_labels:
-                col_name = column_map.characterization.get(label, '')
-                if battery_id_str and label in pb_char:
-                    col_name = pb_char[label].get(battery_id_str, col_name)
-                if not col_name or col_name not in df.columns:
-                    continue
-                series = df[col_name]
-                numeric_vals = pd.to_numeric(series, errors="coerce").dropna()
-                if len(numeric_vals):
-                    decimals = column_map.decimal_places.get(label, None)
-                    if decimals is not None:
-                        numeric_vals = numeric_vals.round(decimals)
-                    char_values[label] = round(float(numeric_vals.mean()), 1)
-                    continue
-                non_empty = series.dropna().astype(str).str.strip()
-                non_empty = non_empty[non_empty != ""]
-                if len(non_empty):
-                    char_values[label] = non_empty.iloc[0]
-            if "identifier" not in char_values:
-                id_col = next((c for c in df.columns if _ROLE_PATTERNS["identifier"].search(str(c))), None)
-                if id_col is not None:
-                    series = df[id_col]
-                    numeric_vals = pd.to_numeric(series, errors="coerce").dropna()
-                    if len(numeric_vals):
-                        char_values["identifier"] = round(float(numeric_vals.mean()), 1)
-                    else:
-                        non_empty = series.dropna().astype(str).str.strip()
-                        non_empty = non_empty[non_empty != ""]
-                        if len(non_empty):
-                            char_values["identifier"] = non_empty.iloc[0]
-            if battery_id_str:
-                char_values["battery_id"] = battery_id_str
+            char_values = _extract_char_values(df, f.path, column_map)
             results.append({"path": f.path, "characterization": char_values})
         except Exception:
             results.append({"path": f.path, "characterization": {}})
