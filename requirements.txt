@@ -4,3 +4,4 @@ impedance>=1.4
 pandas>=2.0
 numpy>=1.26
 scipy>=1.12
+pytest>=8  # dev: run with `python -m pytest tests`
