@@ -135,6 +135,8 @@ async def api_fit_envelope(request: EnvelopeRequest):
             request.confidence,
             frequencies,
             request.n_samples,
+            request.param_names,
+            request.correlation,
         )
         return EnvelopeResponse(
             z_real_upper=z_real_upper.tolist(),
