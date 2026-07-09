@@ -269,8 +269,10 @@ export function TrendsView(container, { navigate, showToast }) {
       if (/^Ws\d+_0/.test(name))       return { scale: 1000, unit: 'mΩ' };
       if (/^Ws\d+_1/.test(name))       return { scale: 1,    unit: 's' };
       if (/^Ws\d+_2/.test(name))       return { scale: 1,    unit: '-' };
-      if (/^La\d+_0/.test(name))       return { scale: 1,    unit: 'H' };
-      if (/^La\d+_1/.test(name))       return { scale: 1000, unit: 'mΩ' };
+      if (/^La\d+_0/.test(name))       return { scale: 1,    unit: 'H·sᵅ⁻¹' };
+      if (/^La\d+_1/.test(name))       return { scale: 1,    unit: '-' };
+      if (/^G\d+_0/.test(name))        return { scale: 1000, unit: 'mΩ' };
+      if (/^G\d+_1/.test(name))        return { scale: 1,    unit: 's' };
       return                                   { scale: 1,    unit: '' };
     }
 
