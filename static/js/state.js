@@ -17,6 +17,7 @@ const _defaults = {
   fitCacheKey: null,
   drtResults: [],
   drtLambda: 1e-3,
+  drtMode: 'imag',   // 'imag' (Im-only kernel) or 'complex' (joint Re+Im)
   drtSelectedFile: null,
   drtExpBattery: null,
   drtExpIdentifier: null,
