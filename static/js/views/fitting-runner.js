@@ -24,6 +24,8 @@ function checkPhysical(name, value) {
   if (/^L\d/.test(name)  && value < 0)           return 'negative inductance';
   if (/^CPE\d+_1/.test(name) && (value < 0 || value > 1)) return 'α outside 0–1';
   if (/^(Wo|Ws|W)\d/.test(name) && value < 0)   return 'negative Warburg';
+  if (/^La\d+_1/.test(name) && (value < 0 || value > 1)) return 'α outside 0–1';
+  if (/^G\d/.test(name)  && value < 0)           return 'negative Gerischer';
   return null;
 }
 
@@ -40,8 +42,10 @@ function paramUnitInfo(name) {
   if (/^Ws\d+_0/.test(name))      return { scale: 1000, unit: 'mΩ' };
   if (/^Ws\d+_1/.test(name))      return { scale: 1,    unit: 's' };
   if (/^Ws\d+_2/.test(name))      return { scale: 1,    unit: '-' };
-  if (/^La\d+_0/.test(name))      return { scale: 1,    unit: 'H' };
-  if (/^La\d+_1/.test(name))      return { scale: 1000, unit: 'mΩ' };
+  if (/^La\d+_0/.test(name))      return { scale: 1,    unit: 'H·sᵅ⁻¹' };
+  if (/^La\d+_1/.test(name))      return { scale: 1,    unit: '-' };
+  if (/^G\d+_0/.test(name))       return { scale: 1000, unit: 'mΩ' };
+  if (/^G\d+_1/.test(name))       return { scale: 1,    unit: 's' };
   return                                  { scale: 1,    unit: '' };
 }
 
@@ -136,6 +140,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     const weighting      = state.fitWeighting ?? 'none';
     const solver         = state.fitSolver ?? 'lm';
     const omitInductive  = state.omitInductive ?? false;
+    const failedCount    = [...resultMap.values()].filter(r => r && !r.success).length;
 
     container.innerHTML = `
       <div class="section-header">Fit</div>
@@ -235,6 +240,11 @@ export function FittingRunnerView(container, { navigate, showToast }) {
               <button class="btn btn-primary" id="run-btn" ${!ready ? 'disabled' : ''} style="width:100%;">
                 ${cached ? '↺ Re-run' : '▶ Run Fitting'}
               </button>
+              ${failedCount > 0 ? `
+                <button class="btn btn-secondary" id="retry-btn" ${!ready ? 'disabled' : ''}
+                        style="width:100%;margin-top:6px;" title="Re-fit only the files that failed — successful results are kept">
+                  ↻ Retry failed (${failedCount})
+                </button>` : ''}
               <button class="btn btn-danger" id="stop-btn" style="display:none;width:100%;">■ Stop</button>
             </div>
           </div>
@@ -296,7 +306,8 @@ export function FittingRunnerView(container, { navigate, showToast }) {
 
     container.querySelector('#back-btn').addEventListener('click', () => navigate(5));
     container.querySelector('#next-btn').addEventListener('click', () => navigate(7));
-    container.querySelector('#run-btn').addEventListener('click', runFitting);
+    container.querySelector('#run-btn').addEventListener('click', () => runFitting());
+    container.querySelector('#retry-btn')?.addEventListener('click', () => runFitting({ retryFailedOnly: true }));
     container.querySelector('#stop-btn').addEventListener('click', stopFitting);
     container.querySelector('#kk-run-btn').addEventListener('click', runKK);
     container.querySelector('#clear-cache-link')?.addEventListener('click', e => { e.preventDefault(); runFitting(); });
@@ -867,34 +878,48 @@ export function FittingRunnerView(container, { navigate, showToast }) {
   function stopFitting() { _abortCtrl?.abort(); }
   function onKeyDown(e) { if (e.key === 'Escape') closeModal(); }
 
-  async function runFitting() {
+  let _running = false;
+
+  async function runFitting(opts = {}) {
+    if (_running) return;
+    const retryOnly = opts.retryFailedOnly === true;
     const state  = getState();
     if (!state.files?.length || !state.columnMap || !state.circuitConfig) return;
     const myGen  = _viewGen;   // snapshot — if user leaves and re-enters, _viewGen changes
 
+    // Retry mode targets only files whose last fit failed; successes are kept.
+    const targetFiles = retryOnly
+      ? state.files.filter(f => { const r = resultMap.get(f.path); return r && !r.success; })
+      : state.files;
+    if (!targetFiles.length) return;
+    _running = true;
+
     const runBtn        = container.querySelector('#run-btn');
+    const retryBtn      = container.querySelector('#retry-btn');
     const stopBtn       = container.querySelector('#stop-btn');
     const nextBtn       = container.querySelector('#next-btn');
     const fitStatus     = container.querySelector('#fit-status');
     const progressBar   = container.querySelector('#progress-bar');
     const progressLabel = container.querySelector('#progress-label');
 
-    const filePaths = state.files.map(f => f.path);
     _abortCtrl = new AbortController();
     runBtn.disabled  = true;
+    if (retryBtn) retryBtn.disabled = true;
     stopBtn.style.display = '';
     fitStatus.style.display = '';
 
-    resultMap.clear();
-    setState({ fitCacheKey: null, fitResults: [] });
+    if (retryOnly) {
+      for (const f of targetFiles) resultMap.delete(f.path);
+      setState({ fitCacheKey: null });
+    } else {
+      resultMap.clear();
+      setState({ fitCacheKey: null, fitResults: [] });
+    }
     // Rebuild so KK tiles (if any) are still visible while fit is running
     rebuildGrid();
 
-    // Pre-sized array keeps results aligned with filePaths order (important for state reload).
-    // Results arrive out of order with parallel fitting, so we index by path lookup.
-    const resultsByPath = {};
-    const results = new Array(filePaths.length).fill(null);
     let completedCount = 0;
+    let okCount = 0;
     let stopped = false, gotDone = false;
 
     const timeout         = parseFloat(container.querySelector('#fit-timeout').value) || 60;
@@ -916,7 +941,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       // Attach per-file KK-derived freq range and Rs estimate to each FileInfo.
       // Per-file values take priority in the backend; global inputs are the fallback.
       const kkData = getState().kkData ?? {};
-      const filesWithKK = state.files.map(f => {
+      const filesWithKK = targetFiles.map(f => {
         const kk = kkData[f.path];
         return {
           ...f,
@@ -947,34 +972,35 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         } else if (event.event === 'result') {
           const result = event.data;
           const path = result.path;
-          const fileIdx = filePaths.indexOf(path);
-          if (fileIdx >= 0) results[fileIdx] = result;
-          resultsByPath[path] = result;
           completedCount++;
+          if (result.success) okCount++;
           resultMap.set(path, result);
           updateFitTile(result, path);
           await new Promise(r => requestAnimationFrame(r));
         } else if (event.event === 'done') {
           gotDone = true;
           progressBar.style.width = '100%';
-          const ok = results.filter(r => r?.success).length;
-          progressLabel.textContent = `Done — ${ok}/${completedCount} successful`;
+          progressLabel.textContent = `Done — ${okCount}/${completedCount} successful`;
         }
       }
     } catch (err) {
       if (err.name === 'AbortError') {
         stopped = true;
-        const ok = results.filter(r => r?.success).length;
-        progressLabel.textContent = `Stopped — ${ok}/${completedCount} completed`;
+        progressLabel.textContent = `Stopped — ${okCount}/${completedCount} completed`;
       } else {
         showToast(`Fitting error: ${err.message}`, 'error');
       }
     } finally {
       _activeView = 'fit';
-      const orderedResults = results.filter(r => r !== null);
+      _running = false;
+      // Merge this run's results with any kept from previous runs (retry mode),
+      // in canonical state.files order — everything keyed by path.
+      const merged = (getState().files || [])
+        .map(f => resultMap.get(f.path))
+        .filter(Boolean);
       // Always persist results — even if the user navigated away, the data is valuable.
       setState({
-        fitResults:  orderedResults,
+        fitResults:  merged,
         fitCacheKey: (!stopped && gotDone) ? runCacheKey : null,
         maxStep:     Math.max(state.maxStep, 7),
       });
