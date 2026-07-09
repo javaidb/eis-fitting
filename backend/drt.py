@@ -5,7 +5,7 @@ import traceback
 from typing import AsyncGenerator
 
 import numpy as np
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, nnls
 from scipy.signal import find_peaks
 
 from .file_handler import load_eis_data
@@ -38,8 +38,22 @@ def _build_kernel(frequencies: np.ndarray, n_tau: int = 100):
 
 
 def _solve_tikhonov(K: np.ndarray, L: np.ndarray, rhs: np.ndarray, lambda_reg: float) -> np.ndarray:
-    A = K.T @ K + lambda_reg * (L.T @ L)
-    return np.maximum(np.linalg.solve(A, K.T @ rhs), 0.0)
+    """Non-negative Tikhonov solve: min ‖Kγ − rhs‖² + λ‖Lγ‖²  s.t. γ ≥ 0.
+
+    Solved as NNLS on the augmented system [K; √λ·L] γ = [rhs; 0]. Clipping the
+    unconstrained solution to zero is NOT equivalent — negative lobes of the
+    unconstrained solution carry mass that must be redistributed, otherwise peak
+    amplitudes and positions are distorted.
+    """
+    A_aug = np.vstack([K, np.sqrt(lambda_reg) * L])
+    b_aug = np.concatenate([rhs, np.zeros(L.shape[0])])
+    try:
+        gamma, _ = nnls(A_aug, b_aug, maxiter=10 * A_aug.shape[1])
+        return gamma
+    except RuntimeError:
+        # NNLS failed to converge — fall back to the clipped unconstrained solution.
+        A = K.T @ K + lambda_reg * (L.T @ L)
+        return np.maximum(np.linalg.solve(A, K.T @ rhs), 0.0)
 
 
 def _merge_nearby_peaks(log_tau: np.ndarray, gamma: np.ndarray, peaks: list[dict]) -> list[dict]:
@@ -324,7 +338,9 @@ def _fit_gaussian_peaks(log_tau: np.ndarray, gamma: np.ndarray) -> list[dict]:
 
         fitted = gauss(log_tau, A, mu, sig)
 
-        # R²: compare fitted Gaussian to the residual within ±1.5σ
+        # Shape-match score (1 − RMSE/peak height) within ±1.5σ — a 0–1 goodness
+        # heuristic for how Gaussian the peak is, NOT a statistical R².  The field
+        # is named "r2" for backwards compatibility with cached results.
         window = np.abs(log_tau - mu) <= 1.5 * max(sig, 0.1)
         if window.sum() >= 3:
             peak_h = float(residual[window].max())
@@ -380,64 +396,34 @@ def compute_lcurve_data(
 ):
     """Compute L-curve: residual norm vs solution norm across λ values.
     Returns dict with points, optimal_lambda, optimal_index.
-    Corner is detected via maximum curvature in log-log space."""
-    omega = 2 * np.pi * frequencies
+    Corner is detected via the triangle method in normalised log-log space."""
     z_imag = -Z.imag
-
-    n_tau = 100
-    log_tau_min = np.log10(1.0 / omega.max()) - 1.0
-    log_tau_max = np.log10(1.0 / omega.min()) + 1.0
-    log_tau = np.linspace(log_tau_min, log_tau_max, n_tau)
-    tau = 10.0 ** log_tau
-    d_log10 = log_tau[1] - log_tau[0]
-
-    wt = omega[:, None] * tau[None, :]
-    K = wt / (1.0 + wt ** 2) * np.log(10) * d_log10
-
-    L = np.zeros((n_tau - 2, n_tau))
-    idx = np.arange(n_tau - 2)
-    L[idx, idx]     =  1.0
-    L[idx, idx + 1] = -2.0
-    L[idx, idx + 2] =  1.0
+    _, K, _, L = _build_kernel(frequencies)
 
     lambdas = np.logspace(np.log10(lambda_min), np.log10(lambda_max), n_lambda)
 
     points = []
     for lam in lambdas:
-        A = K.T @ K + lam * (L.T @ L)
-        b = K.T @ z_imag
-        gamma = np.maximum(np.linalg.solve(A, b), 0.0)
+        gamma = _solve_tikhonov(K, L, z_imag, lam)
         points.append({
             "lambda_val":    float(lam),
             "residual_norm": float(np.linalg.norm(K @ gamma - z_imag)),
             "solution_norm": float(np.linalg.norm(L @ gamma)),
         })
 
-    # Corner detection: minimum of residual norm.
-    #
-    # With a positivity-constrained DRT (gamma >= 0), the residual norm is NOT
-    # monotone in lambda.  At very low lambda the unconstrained solution has large
-    # negative lobes that are clipped to zero, wrecking the fit; at very high
-    # lambda over-smoothing also degrades the fit.  The minimum residual norm
-    # therefore identifies the lambda at which the non-negativity constraint first
-    # "costs" nothing — the geometric corner of this constrained L-curve.
-    #
-    # Fallback: if the minimum is at a boundary (lambda range too narrow), use
-    # the triangle method (max perpendicular distance from the chord in normalised
-    # log-log space) which is the most robust purely geometric criterion.
-    residual_norms = np.array([p["residual_norm"] for p in points])
-    corner_idx = int(np.argmin(residual_norms))
-
-    if corner_idx <= 1 or corner_idx >= n_lambda - 2:
-        # Fallback: geometric triangle method
-        log_rn = np.log10(residual_norms)
-        log_sn = np.log10(np.array([p["solution_norm"] for p in points]))
-        rn_n = (log_rn - log_rn.min()) / (log_rn.max() - log_rn.min() + 1e-30)
-        sn_n = (log_sn - log_sn.min()) / (log_sn.max() - log_sn.min() + 1e-30)
-        dx = rn_n[-1] - rn_n[0]
-        dy = sn_n[-1] - sn_n[0]
-        dist = np.abs(dy * (rn_n - rn_n[0]) - dx * (sn_n - sn_n[0])) / (np.sqrt(dx**2 + dy**2) + 1e-30)
-        corner_idx = int(np.argmax(dist))
+    # Corner detection: triangle method — the point of maximum perpendicular
+    # distance from the chord connecting the L-curve endpoints in normalised
+    # log-log space.  With a true non-negative Tikhonov solver the residual norm
+    # grows monotonically with λ, so the knee of the residual/smoothness
+    # trade-off is the geometric corner.
+    log_rn = np.log10(np.maximum([p["residual_norm"] for p in points], 1e-30))
+    log_sn = np.log10(np.maximum([p["solution_norm"] for p in points], 1e-30))
+    rn_n = (log_rn - log_rn.min()) / (log_rn.max() - log_rn.min() + 1e-30)
+    sn_n = (log_sn - log_sn.min()) / (log_sn.max() - log_sn.min() + 1e-30)
+    dx = rn_n[-1] - rn_n[0]
+    dy = sn_n[-1] - sn_n[0]
+    dist = np.abs(dy * (rn_n - rn_n[0]) - dx * (sn_n - sn_n[0])) / (np.sqrt(dx**2 + dy**2) + 1e-30)
+    corner_idx = int(np.argmax(dist))
 
     return {
         "points":         points,
