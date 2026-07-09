@@ -26,7 +26,7 @@ class FitInterrupted(Exception):
     """
 
 
-_TWO_PARAM = {"CPE", "Wo", "Ws", "La"}
+_TWO_PARAM = {"CPE", "Wo", "Ws", "La", "G"}
 
 # Default (initial, lower, upper) per parameter type key.
 # Type key is element-name + suffix, e.g. "R", "CPE_0", "CPE_1", "Wo_1".
@@ -45,6 +45,8 @@ _PARAM_DEFAULTS: Dict[str, tuple[float, float, float]] = {
     'Ws_2':  (0.5,   0.0, 1.0),
     'La_0':  (1e-6,  0.0, float('inf')),
     'La_1':  (0.01,  0.0, float('inf')),
+    'G_0':   (0.01,  0.0, float('inf')),   # Gerischer R_G (Ω)
+    'G_1':   (1.0,   0.0, float('inf')),   # Gerischer t_G (s)
 }
 
 # Matches 2-element RC-pair parallel blocks: p(R<n>,CPE<n>) or p(R<n>,C<n>)
@@ -237,12 +239,56 @@ def _fit_objective(Z: np.ndarray, Z_fit: np.ndarray, weighting: str) -> float:
 
 # ── scipy-based fitting primitives ───────────────────────────────────────────
 
+def _split_free(
+    initials: List[float], lowers: List[float], uppers: List[float]
+) -> tuple[list[int], Callable[[np.ndarray], np.ndarray]]:
+    """Partition parameters into free and fixed.  lower == upper pins a parameter.
+
+    Fixed parameters are excluded from the optimization vector entirely —
+    scipy's TRF rejects lower == upper bounds, and epsilon-width intervals are
+    numerically fragile.  Returns (free_ix, embed) where embed(free_values)
+    reconstructs the full parameter vector with fixed parameters at their
+    pinned values.
+    """
+    full = np.array(initials, dtype=float)
+    free_ix: list[int] = []
+    for i, (lo, hi) in enumerate(zip(lowers, uppers)):
+        if np.isfinite(lo) and np.isfinite(hi) and lo == hi:
+            full[i] = lo   # pinned value
+        else:
+            free_ix.append(i)
+
+    def embed(free_vals) -> np.ndarray:
+        out = full.copy()
+        if len(free_ix):
+            out[free_ix] = np.asarray(free_vals, dtype=float)
+        return out
+
+    return free_ix, embed
+
+
+def _expand_pcov(pcov_free: np.ndarray, free_ix: list[int], n: int) -> np.ndarray:
+    """Embed a free-parameter covariance into the full p×p matrix.
+
+    Fixed parameters get zero rows/columns (no uncertainty), keeping the
+    matrix aligned with param_names for the correlation display and envelope.
+    """
+    full = np.zeros((n, n))
+    full[np.ix_(free_ix, free_ix)] = pcov_free
+    return full
+
+
 def _make_model_func(
     circuit_string: str,
     frequencies: np.ndarray,
     should_stop: Callable[[], bool] | None = None,
+    embed: Callable[[np.ndarray], np.ndarray] | None = None,
 ):
-    """Return a scipy-compatible model function and a fresh CustomCircuit instance."""
+    """Return a scipy-compatible model function and a fresh CustomCircuit instance.
+
+    When embed is given, the model function receives only free parameters and
+    reconstructs the full circuit vector through it.
+    """
     n_params = count_circuit_params(circuit_string)
     c = CustomCircuit(circuit=circuit_string, initial_guess=[1.0] * n_params)
     x_dummy = np.zeros(2 * len(frequencies))
@@ -250,7 +296,7 @@ def _make_model_func(
     def model_func(x, *params):
         if should_stop is not None and should_stop():
             raise FitInterrupted()
-        c.parameters_ = np.array(params)
+        c.parameters_ = embed(params) if embed is not None else np.array(params)
         Z_pred = c.predict(frequencies)
         return np.concatenate([Z_pred.real, Z_pred.imag])
 
@@ -273,16 +319,29 @@ def _do_lm_fit(
     absolute_sigma stays False: our sigmas are weighting schemes (|Z| proxies),
     not measurement-noise estimates, so pcov must be rescaled by the reduced
     chi-square — otherwise uncertainties are inflated by ~1/(relative noise).
+
+    Parameters with lower == upper are pinned at that value and excluded from
+    the optimization vector (fixed-parameter support).
     """
-    model_func, c, x_dummy = _make_model_func(circuit_string, frequencies, should_stop)
+    free_ix, embed = _split_free(initials, lowers, uppers)
+    model_func, c, x_dummy = _make_model_func(circuit_string, frequencies, should_stop, embed)
+
+    if not free_ix:
+        # Every parameter pinned — nothing to optimise, just evaluate.
+        popt = embed([])
+        c.parameters_ = popt
+        return popt, None, c.predict(frequencies)
+
     Z_target = np.concatenate([Z.real, Z.imag])
     sigma = _compute_sigma(Z, weighting)
-    uppers_safe = [float('inf') if np.isinf(u) else u for u in uppers]
+    p0_free = [initials[i] for i in free_ix]
+    lo_free = [lowers[i] for i in free_ix]
+    hi_free = [float('inf') if np.isinf(uppers[i]) else uppers[i] for i in free_ix]
 
-    popt, pcov = curve_fit(
+    popt_free, pcov_free = curve_fit(
         model_func, x_dummy, Z_target,
-        p0=initials,
-        bounds=(lowers, uppers_safe),
+        p0=p0_free,
+        bounds=(lo_free, hi_free),
         sigma=sigma,
         absolute_sigma=False,
         method='trf',
@@ -290,9 +349,12 @@ def _do_lm_fit(
     )
 
     # A rank-deficient Jacobian yields inf in pcov → treat as unavailable.
-    if np.any(~np.isfinite(pcov)):
+    if np.any(~np.isfinite(pcov_free)):
         pcov = None
+    else:
+        pcov = _expand_pcov(pcov_free, free_ix, len(initials))
 
+    popt = embed(popt_free)
     c.parameters_ = popt
     return popt, pcov, c.predict(frequencies)
 
@@ -312,14 +374,20 @@ def _do_diff_ev_fit(
     DE handles multi-modal landscapes better than LM. pcov is estimated via a
     follow-up TRF fit starting from the DE solution.
     """
+    free_ix, embed = _split_free(initials, lowers, uppers)
     model_func, c, _ = _make_model_func(circuit_string, frequencies)
     sigma = _compute_sigma(Z, weighting)
+
+    if not free_ix:
+        popt = embed([])
+        c.parameters_ = popt
+        return popt, None, c.predict(frequencies)
 
     def objective(params: np.ndarray) -> float:
         if should_stop is not None and should_stop():
             raise FitInterrupted()
         try:
-            c.parameters_ = params
+            c.parameters_ = embed(params)
             Z_pred = c.predict(frequencies)
             res_r = Z.real - Z_pred.real
             res_i = Z.imag - Z_pred.imag
@@ -332,7 +400,8 @@ def _do_diff_ev_fit(
 
     # DE requires finite bounds; fall back to initial-value-based ranges for unbounded params.
     bounds_de = []
-    for lo, hi, i0 in zip(lowers, uppers, initials):
+    for j in free_ix:
+        lo, hi, i0 = lowers[j], uppers[j], initials[j]
         lo_eff = lo if np.isfinite(lo) else max(abs(i0) * 1e-6, 1e-30)
         hi_eff = hi if np.isfinite(hi) else max(abs(i0) * 1e4, 1e4)
         if lo_eff >= hi_eff:
@@ -345,7 +414,7 @@ def _do_diff_ev_fit(
         polish=True,
         workers=1,
     )
-    popt = de_result.x
+    popt = embed(de_result.x)
 
     # Estimate covariance via TRF from the DE optimum.  An interruption during
     # this polish step is swallowed too — the DE result itself is already done.
@@ -375,14 +444,20 @@ def _do_basin_hopping_fit(
     Combines random perturbations with L-BFGS-B local steps to escape local
     minima. pcov estimated via a follow-up TRF fit from the best solution.
     """
+    free_ix, embed = _split_free(initials, lowers, uppers)
     model_func, c, _ = _make_model_func(circuit_string, frequencies)
     sigma = _compute_sigma(Z, weighting)
+
+    if not free_ix:
+        popt = embed([])
+        c.parameters_ = popt
+        return popt, None, c.predict(frequencies)
 
     def objective(params: np.ndarray) -> float:
         if should_stop is not None and should_stop():
             raise FitInterrupted()
         try:
-            c.parameters_ = params
+            c.parameters_ = embed(params)
             Z_pred = c.predict(frequencies)
             res_r = Z.real - Z_pred.real
             res_i = Z.imag - Z_pred.imag
@@ -395,7 +470,8 @@ def _do_basin_hopping_fit(
 
     # Build finite bounds for the local minimizer step.
     bounds_bh = []
-    for lo, hi, i0 in zip(lowers, uppers, initials):
+    for j in free_ix:
+        lo, hi, i0 = lowers[j], uppers[j], initials[j]
         lo_eff = lo if np.isfinite(lo) else max(abs(i0) * 1e-6, 1e-30)
         hi_eff = hi if np.isfinite(hi) else max(abs(i0) * 1e4, 1e4)
         if lo_eff >= hi_eff:
@@ -403,12 +479,12 @@ def _do_basin_hopping_fit(
         bounds_bh.append((lo_eff, hi_eff))
 
     result = basinhopping(
-        objective, initials,
+        objective, [initials[j] for j in free_ix],
         minimizer_kwargs={'method': 'L-BFGS-B', 'bounds': bounds_bh},
         niter=200,
         seed=42,
     )
-    popt = result.x
+    popt = embed(result.x)
 
     pcov = None
     try:
@@ -436,17 +512,26 @@ def _do_nelder_mead_fit(
     Bounds are enforced via a hard penalty. pcov estimated via a follow-up TRF
     fit from the Nelder-Mead solution.
     """
+    free_ix, embed = _split_free(initials, lowers, uppers)
     model_func, c, _ = _make_model_func(circuit_string, frequencies)
     sigma = _compute_sigma(Z, weighting)
+
+    if not free_ix:
+        popt = embed([])
+        c.parameters_ = popt
+        return popt, None, c.predict(frequencies)
+
+    lo_free = [lowers[j] for j in free_ix]
+    hi_free = [uppers[j] for j in free_ix]
 
     def objective(params: np.ndarray) -> float:
         if should_stop is not None and should_stop():
             raise FitInterrupted()
         try:
-            for val, lo, hi in zip(params, lowers, uppers):
+            for val, lo, hi in zip(params, lo_free, hi_free):
                 if val < lo or (np.isfinite(hi) and val > hi):
                     return 1e30
-            c.parameters_ = params
+            c.parameters_ = embed(params)
             Z_pred = c.predict(frequencies)
             res_r = Z.real - Z_pred.real
             res_i = Z.imag - Z_pred.imag
@@ -458,11 +543,11 @@ def _do_nelder_mead_fit(
             return 1e30
 
     result = minimize(
-        objective, initials,
+        objective, [initials[j] for j in free_ix],
         method='Nelder-Mead',
         options={'maxiter': 50000, 'xatol': 1e-8, 'fatol': 1e-8},
     )
-    popt = result.x
+    popt = embed(result.x)
 
     pcov = None
     try:
@@ -560,7 +645,10 @@ def fit_single(
         try:
             param_names, _ = get_param_names(variant_circuit)
             initials, lowers, uppers = _resolve_bounds(param_names, name_lookup, rs_estimate)
-            k = len(param_names)
+            # Model complexity counts only free parameters — pinned ones
+            # (lower == upper) don't consume degrees of freedom.
+            free_ix_variant, _ = _split_free(initials, lowers, uppers)
+            k = len(free_ix_variant)
 
             best_obj = float('inf')
             best_popt: np.ndarray | None = None
