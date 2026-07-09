@@ -115,17 +115,20 @@ class DRTRequest(BaseModel):
     files: List[FileInfo]
     column_map: ColumnMap
     lambda_reg: float = 1e-3
+    mode: str = "imag"                # 'imag' (Im-only kernel) or 'complex' (joint Re+Im)
 
 
 class DRTSingleRequest(BaseModel):
     file: FileInfo
     column_map: ColumnMap
     lambda_reg: float = 1e-3
+    mode: str = "imag"
 
 
 class LCurveRequest(BaseModel):
     file: FileInfo
     column_map: ColumnMap
+    mode: str = "imag"
 
 
 class DRTResult(BaseModel):
@@ -139,6 +142,9 @@ class DRTResult(BaseModel):
     characterization: Dict[str, Union[float, str]] = {}
     lambda_used: Optional[float] = None
     lambda_variants: List[dict] = []  # [{lambda_val, gamma}] for ±1,2 OOM stability overlay
+    mode: str = "imag"                # kernel used for this result
+    r_inf: Optional[float] = None     # fitted series resistance (complex mode, Ω)
+    inductance: Optional[float] = None  # fitted series inductance (complex mode, H)
 
 
 class EnvelopeRequest(BaseModel):
