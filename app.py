@@ -35,6 +35,12 @@ CIRCUIT_ELEMENTS = [
     {"symbol": "Ws",  "name": "Warburg (short)",           "n_params": 2, "color": "#16a085",
      "param_labels": ["R", "τ"], "param_units": ["Ω", "s"],
      "description": "Finite-length diffusion, transmissive boundary"},
+    {"symbol": "La",  "name": "Inductor (modified)",       "n_params": 2, "color": "#8e44ad",
+     "param_labels": ["L", "α"], "param_units": ["H·sᵅ⁻¹", ""],
+     "description": "Imperfect inductor Z = L(jω)^α; models HF cable/lead artifacts"},
+    {"symbol": "G",   "name": "Gerischer",                 "n_params": 2, "color": "#c0392b",
+     "param_labels": ["R", "τ"], "param_units": ["Ω", "s"],
+     "description": "Coupled diffusion-reaction: Z = R/√(1+jωτ)"},
 ]
 
 PARAM_DEFAULTS = {
@@ -48,6 +54,10 @@ PARAM_DEFAULTS = {
     "Wo_t": {"initial": 1.0,   "lower": 0.0, "upper": None},
     "Ws_R": {"initial": 100.0, "lower": 0.0, "upper": None},
     "Ws_t": {"initial": 1.0,   "lower": 0.0, "upper": None},
+    "La_L": {"initial": 1e-6,  "lower": 0.0, "upper": None},
+    "La_a": {"initial": 1.0,   "lower": 0.0, "upper": 1.0},
+    "G_R":  {"initial": 0.01,  "lower": 0.0, "upper": None},
+    "G_t":  {"initial": 1.0,   "lower": 0.0, "upper": None},
 }
 
 
@@ -181,7 +191,7 @@ async def api_drt_single(request: DRTSingleRequest):
 
 @app.post("/api/drt-auto-single")
 async def api_drt_auto_single(request: LCurveRequest):
-    return await compute_drt_auto_for_file(request.file, request.column_map)
+    return await compute_drt_auto_for_file(request.file, request.column_map, request.mode)
 
 
 @app.post("/api/drt-lcurve")
