@@ -143,14 +143,29 @@ def run_kk_single(
     residual_mag = np.sqrt(res_real ** 2 + res_imag ** 2)
     flagged = list(map(int, np.where(residual_mag > residual_threshold)[0]))
 
-    # Suggest freq range as the contiguous band of compliant points.
+    # Suggest freq range as the longest contiguous band of compliant points
+    # (min/max of all compliant points would silently include non-compliant
+    # points sitting mid-band).
     valid = residual_mag <= residual_threshold
     freq_min_s: Optional[float] = None
     freq_max_s: Optional[float] = None
     if valid.any():
-        valid_freqs = frequencies[valid]
-        freq_min_s = float(valid_freqs.min())
-        freq_max_s = float(valid_freqs.max())
+        order = np.argsort(frequencies)
+        valid_sorted = valid[order]
+        best_len, best_start = 0, 0
+        cur_len, cur_start = 0, 0
+        for i, ok in enumerate(valid_sorted):
+            if ok:
+                if cur_len == 0:
+                    cur_start = i
+                cur_len += 1
+                if cur_len > best_len:
+                    best_len, best_start = cur_len, cur_start
+            else:
+                cur_len = 0
+        band = order[best_start:best_start + best_len]
+        freq_min_s = float(frequencies[band].min())
+        freq_max_s = float(frequencies[band].max())
 
     # Interpolated real-axis intercepts (more accurate than raw endpoint Z').
     hf_intercept, lf_intercept = _find_nyquist_intercepts(frequencies, Z)
