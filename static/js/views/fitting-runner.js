@@ -126,8 +126,11 @@ export function FittingRunnerView(container, { navigate, showToast }) {
 
     resultMap.clear();
     const files = state.files || [];
+    // Map by result path, not position: a stopped run leaves gaps, and index
+    // alignment would assign file N's tile the result of file M.
     (state.fitResults || []).forEach((r, i) => {
-      if (files[i]) resultMap.set(files[i].path, r);
+      const path = r?.path || files[i]?.path;   // index fallback for legacy saved results
+      if (path) resultMap.set(path, r);
     });
 
     const weighting      = state.fitWeighting ?? 'none';
@@ -1055,6 +1058,8 @@ export function FittingRunnerView(container, { navigate, showToast }) {
             confidence:     result.confidence,
             frequencies:    result.frequencies,
             n_samples:      200,
+            param_names:    result.param_names ?? null,   // ordering for the correlation matrix
+            correlation:    result.correlation ?? null,   // joint sampling — respects R‖CPE correlations
           }),
         });
         if (!resp.ok) throw new Error('Envelope computation failed');
