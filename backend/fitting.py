@@ -168,10 +168,18 @@ def _sample_initial_guess(
     return guess
 
 
-def _compute_aic_bic(Z: np.ndarray, Z_fit: np.ndarray, k: int) -> tuple[float, float]:
-    """AIC and BIC for complex-impedance regression (real+imag as separate observations)."""
+def _compute_aic_bic(
+    Z: np.ndarray, Z_fit: np.ndarray, k: int, weighting: str = 'none'
+) -> tuple[float, float]:
+    """AIC and BIC for complex-impedance regression (real+imag as separate observations).
+
+    Uses the same weighted residuals the fit minimised, so model selection is
+    consistent with the estimation objective.  Likelihood terms shared by all
+    variants on the same spectrum (the Σlog σᵢ constant) cancel in ΔAIC/ΔBIC
+    comparisons and are dropped.
+    """
     n = 2 * len(Z)
-    rss = float(np.sum((Z.real - Z_fit.real) ** 2 + (Z.imag - Z_fit.imag) ** 2))
+    rss = _fit_objective(Z, Z_fit, weighting)
     if rss <= 0 or n <= 0:
         return float('-inf'), float('-inf')
     ll = n * np.log(rss / n)
@@ -197,6 +205,21 @@ def _compute_sigma(Z: np.ndarray, weighting: str) -> np.ndarray | None:
         si = np.maximum(np.abs(Z.imag), np.abs(Z.real) * 0.01 + 1e-30)
         return np.concatenate([sr, si])
     return None  # 'none' → unweighted
+
+
+def _fit_objective(Z: np.ndarray, Z_fit: np.ndarray, weighting: str) -> float:
+    """Weighted residual sum of squares under the given weighting scheme.
+
+    This is the quantity the solvers minimise — used to rank multi-start
+    restarts and to feed AIC/BIC so selection is consistent with estimation.
+    """
+    sigma = _compute_sigma(Z, weighting)
+    res_r = Z.real - Z_fit.real
+    res_i = Z.imag - Z_fit.imag
+    if sigma is not None:
+        n = len(Z)
+        return float(np.sum((res_r / sigma[:n]) ** 2 + (res_i / sigma[n:]) ** 2))
+    return float(np.sum(res_r ** 2 + res_i ** 2))
 
 
 # ── scipy-based fitting primitives ───────────────────────────────────────────
@@ -227,6 +250,9 @@ def _do_lm_fit(
     """Fit circuit via scipy TRF (bounded LM). Returns (popt, pcov, Z_fit).
 
     pcov is the full parameter covariance matrix; its diagonal gives 1σ errors.
+    absolute_sigma stays False: our sigmas are weighting schemes (|Z| proxies),
+    not measurement-noise estimates, so pcov must be rescaled by the reduced
+    chi-square — otherwise uncertainties are inflated by ~1/(relative noise).
     """
     model_func, c, x_dummy = _make_model_func(circuit_string, frequencies)
     Z_target = np.concatenate([Z.real, Z.imag])
@@ -238,7 +264,7 @@ def _do_lm_fit(
         p0=initials,
         bounds=(lowers, uppers_safe),
         sigma=sigma,
-        absolute_sigma=(sigma is not None),
+        absolute_sigma=False,
         method='trf',
         max_nfev=10000,
     )
@@ -535,9 +561,8 @@ def fit_single(
                             variant_circuit, guess, lowers, uppers,
                             frequencies, Z, weighting,
                         )
-                        mod = np.maximum(np.abs(Z), 1e-30)
-                        obj = float(np.sum(((Z.real - Z_try.real) / mod) ** 2 +
-                                          ((Z.imag - Z_try.imag) / mod) ** 2))
+                        # Rank restarts by the same objective the solver minimised
+                        obj = _fit_objective(Z, Z_try, weighting)
                         if obj < best_obj:
                             best_obj = obj
                             best_popt = popt
@@ -555,10 +580,8 @@ def fit_single(
                             variant_circuit, guess, lowers, uppers,
                             frequencies, Z, weighting,
                         )
-                        # Rank restarts by modulus-weighted objective for consistency
-                        mod = np.maximum(np.abs(Z), 1e-30)
-                        obj = float(np.sum(((Z.real - Z_try.real) / mod) ** 2 +
-                                          ((Z.imag - Z_try.imag) / mod) ** 2))
+                        # Rank restarts by the same objective the solver minimised
+                        obj = _fit_objective(Z, Z_try, weighting)
                         if obj < best_obj:
                             best_obj = obj
                             best_popt = popt
@@ -571,7 +594,7 @@ def fit_single(
                 raise RuntimeError("all restarts failed")
 
             residual = float(np.mean(np.abs(Z - Z_fit) / (np.abs(Z) + 1e-12)))
-            aic, bic = _compute_aic_bic(Z, Z_fit, k)
+            aic, bic = _compute_aic_bic(Z, Z_fit, k, weighting)
             chi_sq_nu = _compute_chi_sq_nu(Z, Z_fit, k, weighting)
             rmse = _compute_rmse(Z, Z_fit)
             correlation = _compute_correlation(best_pcov)
@@ -649,25 +672,55 @@ def compute_fit_envelope(
     confidence: Dict[str, float],
     frequencies: np.ndarray,
     n_samples: int = 200,
+    param_names: List[str] | None = None,
+    correlation: List[List[float]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Monte Carlo ±1σ envelope: sample parameters ~N(μ, σ), collect Z spread.
+    """Monte Carlo ±1σ envelope: sample parameters jointly ~N(μ, Σ), collect Z spread.
+
+    Σ is reconstructed from the fit's correlation matrix and per-parameter 1σ
+    values (Σᵢⱼ = rᵢⱼ σᵢ σⱼ) so correlated parameters move together — sampling
+    them independently would grossly overstate the envelope for the strongly
+    correlated pairs typical of R‖CPE circuits.  Falls back to independent
+    sampling when no correlation matrix is available.
+
+    param_names fixes the ordering of the correlation matrix rows/columns.
 
     Returns (z_real_upper, z_real_lower, z_imag_upper, z_imag_lower) as 84th/16th
     percentiles across samples (≈ ±1σ for a Gaussian distribution).
     """
-    param_names = list(parameters.keys())
-    p0 = np.array([parameters[n] for n in param_names])
-    sigma = np.array([max(confidence.get(n, 0.0), 0.0) for n in param_names])
+    ordered = bool(param_names) and all(n in parameters for n in param_names)
+    names = list(param_names) if ordered else list(parameters.keys())
+    p0 = np.array([parameters[n] for n in names])
+    sigma = np.array([max(confidence.get(n, 0.0), 0.0) for n in names])
+    k = len(names)
+
+    rng = np.random.default_rng(42)
+
+    samples = None
+    # Correlation rows/columns are ordered by param_names — only usable when
+    # that ordering was actually applied to p0/sigma.
+    if correlation is not None and ordered:
+        corr = np.asarray(correlation, dtype=float)
+        if corr.shape == (k, k) and np.all(np.isfinite(corr)):
+            cov = corr * np.outer(sigma, sigma)
+            try:
+                # Eigenvalue clipping guards against slightly non-PSD matrices
+                # from numerical noise in the fit's covariance estimate.
+                evals, evecs = np.linalg.eigh(cov)
+                transform = evecs * np.sqrt(np.clip(evals, 0.0, None))
+                samples = p0 + rng.standard_normal((n_samples, k)) @ transform.T
+            except np.linalg.LinAlgError:
+                samples = None
+    if samples is None:
+        samples = rng.normal(p0, np.where(sigma > 0, sigma, 1e-30), size=(n_samples, k))
 
     n_params = count_circuit_params(circuit_string)
     c = CustomCircuit(circuit=circuit_string, initial_guess=[1.0] * n_params)
 
-    rng = np.random.default_rng(42)
     z_real_samples: list[np.ndarray] = []
     z_imag_samples: list[np.ndarray] = []
 
-    for _ in range(n_samples):
-        sample = rng.normal(p0, np.where(sigma > 0, sigma, 1e-30))
+    for sample in samples:
         sample = np.maximum(sample, 1e-30)
         try:
             c.parameters_ = sample
