@@ -32,6 +32,13 @@ function fmtTau(tau) {
   return `${tau.toFixed(3)} s`;
 }
 
+function fmtInductance(h) {
+  if (h == null) return '—';
+  if (h >= 1e-3) return `${(h * 1e3).toFixed(2)} mH`;
+  if (h >= 1e-6) return `${(h * 1e6).toFixed(2)} µH`;
+  return `${(h * 1e9).toFixed(1)} nH`;
+}
+
 function fmtFreq(hz) {
   if (hz == null) return '—';
   if (hz >= 1e6)  return `${(hz / 1e6).toFixed(2)} MHz`;
@@ -129,6 +136,11 @@ export function DRTView(container, { navigate, showToast }) {
           <div class="drt-panel-title" style="display:flex;align-items:center;gap:6px;">
             <span>Files &middot; ${files.length}</span>
             <div style="flex:1;"></div>
+            <select id="drt-mode-select" class="drt-stats-select"
+                    title="DRT kernel: Im-only uses −Z'' alone; Re+Im fits both parts jointly and also extracts R∞ and series inductance">
+              <option value="imag"    ${(state.drtMode ?? 'imag') !== 'complex' ? 'selected' : ''}>Im-only</option>
+              <option value="complex" ${state.drtMode === 'complex' ? 'selected' : ''}>Re+Im</option>
+            </select>
             <button id="drt-refresh-btn" class="drt-icon-btn"
                     title="Re-run L-curve λ optimisation for all files" style="font-size:14px;">↺</button>
           </div>
@@ -170,6 +182,11 @@ export function DRTView(container, { navigate, showToast }) {
     container.querySelector('#back-btn').addEventListener('click', () => navigate(2));
     container.querySelector('#next-btn').addEventListener('click', () => navigate(4));
     container.querySelector('#drt-refresh-btn')?.addEventListener('click', refreshAll);
+    container.querySelector('#drt-mode-select')?.addEventListener('change', e => {
+      // Kernel change invalidates every cached spectrum — recompute all files.
+      setState({ drtMode: e.target.value });
+      refreshAll();
+    });
     container.querySelector('#drt-stats-ident')?.addEventListener('change', e => {
       _statsIdent = e.target.value;
       updateStatsBody();
@@ -382,7 +399,11 @@ export function DRTView(container, { navigate, showToast }) {
     setRowStatus(file.path, '⋯', false);
 
     try {
-      const result = await computeDRTAuto({ file, column_map: getState().columnMap });
+      const result = await computeDRTAuto({
+        file,
+        column_map: getState().columnMap,
+        mode: getState().drtMode ?? 'imag',
+      });
       if (_autoRunGen !== gen) return;
 
       _cache.set(file.path, result);
@@ -491,7 +512,11 @@ export function DRTView(container, { navigate, showToast }) {
     if (autoBtn) { autoBtn.disabled = true; autoBtn.textContent = '…'; }
 
     try {
-      const data = await computeLCurve({ file, column_map: state.columnMap });
+      const data = await computeLCurve({
+        file,
+        column_map: state.columnMap,
+        mode: state.drtMode ?? 'imag',
+      });
 
       if (!data.success) {
         console.error('L-curve traceback:\n', data.traceback || data.error);
@@ -634,7 +659,12 @@ export function DRTView(container, { navigate, showToast }) {
     setRowStatus(file.filename, '⋯', false);
 
     try {
-      const result = await computeDRTSingle({ file, column_map: state.columnMap, lambda_reg: lambda });
+      const result = await computeDRTSingle({
+        file,
+        column_map: state.columnMap,
+        lambda_reg: lambda,
+        mode: state.drtMode ?? 'imag',
+      });
       if (_computeSeq !== seq) return;
 
       result.lambda_used = lambda;
@@ -819,8 +849,16 @@ export function DRTView(container, { navigate, showToast }) {
       ? `<th class="drt-fcell" title="Characteristic frequency">f_c</th><th title="Blue=low-λ only, green=survives higher λ">Stable</th><th title="Re+Im check">✓</th>`
       : '';
 
+    const complexMeta = result.r_inf != null
+      ? `<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">
+           Re+Im fit: R∞ ≈ ${(result.r_inf * 1000).toFixed(2)} mΩ
+           ${result.inductance != null ? ` · L ≈ ${fmtInductance(result.inductance)}` : ''}
+         </div>`
+      : '';
+
     return `
       <div class="drt-peaks-label">Detected Peaks</div>
+      ${complexMeta}
       <table class="drt-peaks-table">
         <thead><tr><th>#</th><th>τ</th>${enrichHeaders}<th title="Typical assignment by τ range — heuristic, not a measurement">Process*</th><th title="Gaussian shape-match score (1 − RMSE/peak height) — not a statistical R²">Shape</th><th>Width</th></tr></thead>
         <tbody>${rows}</tbody>
