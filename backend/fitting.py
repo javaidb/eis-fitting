@@ -3,7 +3,9 @@ import asyncio
 import json
 import os
 import re
-from typing import AsyncGenerator, Dict, List, Optional, Union
+import threading
+import time
+from typing import AsyncGenerator, Callable, Dict, List, Optional, Union
 
 import numpy as np
 from numpy.random import default_rng
@@ -12,6 +14,17 @@ from impedance.models.circuits import CustomCircuit
 
 from .file_handler import load_eis_data
 from .models import CircuitConfig, ColumnMap, FitRequest, FitResult, OptimizeConfig, VariantResult
+
+class FitInterrupted(Exception):
+    """Raised from inside solver objective evaluations when a fit is cancelled
+    (client disconnected) or has exceeded its per-file deadline.
+
+    Cooperative cancellation: scipy solvers cannot be killed from outside, and
+    an abandoned thread keeps burning CPU and occupying a ThreadPoolExecutor
+    slot.  Instead, every objective/model evaluation checks a should_stop()
+    callback and raises this to unwind the solver within milliseconds.
+    """
+
 
 _TWO_PARAM = {"CPE", "Wo", "Ws", "La"}
 
@@ -224,13 +237,19 @@ def _fit_objective(Z: np.ndarray, Z_fit: np.ndarray, weighting: str) -> float:
 
 # ── scipy-based fitting primitives ───────────────────────────────────────────
 
-def _make_model_func(circuit_string: str, frequencies: np.ndarray):
+def _make_model_func(
+    circuit_string: str,
+    frequencies: np.ndarray,
+    should_stop: Callable[[], bool] | None = None,
+):
     """Return a scipy-compatible model function and a fresh CustomCircuit instance."""
     n_params = count_circuit_params(circuit_string)
     c = CustomCircuit(circuit=circuit_string, initial_guess=[1.0] * n_params)
     x_dummy = np.zeros(2 * len(frequencies))
 
     def model_func(x, *params):
+        if should_stop is not None and should_stop():
+            raise FitInterrupted()
         c.parameters_ = np.array(params)
         Z_pred = c.predict(frequencies)
         return np.concatenate([Z_pred.real, Z_pred.imag])
@@ -246,6 +265,7 @@ def _do_lm_fit(
     frequencies: np.ndarray,
     Z: np.ndarray,
     weighting: str = 'none',
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
     """Fit circuit via scipy TRF (bounded LM). Returns (popt, pcov, Z_fit).
 
@@ -254,7 +274,7 @@ def _do_lm_fit(
     not measurement-noise estimates, so pcov must be rescaled by the reduced
     chi-square — otherwise uncertainties are inflated by ~1/(relative noise).
     """
-    model_func, c, x_dummy = _make_model_func(circuit_string, frequencies)
+    model_func, c, x_dummy = _make_model_func(circuit_string, frequencies, should_stop)
     Z_target = np.concatenate([Z.real, Z.imag])
     sigma = _compute_sigma(Z, weighting)
     uppers_safe = [float('inf') if np.isinf(u) else u for u in uppers]
@@ -285,6 +305,7 @@ def _do_diff_ev_fit(
     frequencies: np.ndarray,
     Z: np.ndarray,
     weighting: str = 'none',
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
     """Fit circuit via differential evolution. Returns (popt, pcov, Z_fit).
 
@@ -295,6 +316,8 @@ def _do_diff_ev_fit(
     sigma = _compute_sigma(Z, weighting)
 
     def objective(params: np.ndarray) -> float:
+        if should_stop is not None and should_stop():
+            raise FitInterrupted()
         try:
             c.parameters_ = params
             Z_pred = c.predict(frequencies)
@@ -324,11 +347,12 @@ def _do_diff_ev_fit(
     )
     popt = de_result.x
 
-    # Estimate covariance via TRF from the DE optimum.
+    # Estimate covariance via TRF from the DE optimum.  An interruption during
+    # this polish step is swallowed too — the DE result itself is already done.
     pcov = None
     try:
         _, pcov, _ = _do_lm_fit(circuit_string, popt.tolist(), lowers, uppers,
-                                  frequencies, Z, weighting)
+                                  frequencies, Z, weighting, should_stop)
     except Exception:
         pass
 
@@ -344,6 +368,7 @@ def _do_basin_hopping_fit(
     frequencies: np.ndarray,
     Z: np.ndarray,
     weighting: str = 'none',
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
     """Fit circuit via basin hopping (global). Returns (popt, pcov, Z_fit).
 
@@ -354,6 +379,8 @@ def _do_basin_hopping_fit(
     sigma = _compute_sigma(Z, weighting)
 
     def objective(params: np.ndarray) -> float:
+        if should_stop is not None and should_stop():
+            raise FitInterrupted()
         try:
             c.parameters_ = params
             Z_pred = c.predict(frequencies)
@@ -386,7 +413,7 @@ def _do_basin_hopping_fit(
     pcov = None
     try:
         _, pcov, _ = _do_lm_fit(circuit_string, popt.tolist(), lowers, uppers,
-                                  frequencies, Z, weighting)
+                                  frequencies, Z, weighting, should_stop)
     except Exception:
         pass
 
@@ -402,6 +429,7 @@ def _do_nelder_mead_fit(
     frequencies: np.ndarray,
     Z: np.ndarray,
     weighting: str = 'none',
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
     """Fit circuit via Nelder-Mead simplex (local, gradient-free). Returns (popt, pcov, Z_fit).
 
@@ -412,6 +440,8 @@ def _do_nelder_mead_fit(
     sigma = _compute_sigma(Z, weighting)
 
     def objective(params: np.ndarray) -> float:
+        if should_stop is not None and should_stop():
+            raise FitInterrupted()
         try:
             for val, lo, hi in zip(params, lowers, uppers):
                 if val < lo or (np.isfinite(hi) and val > hi):
@@ -437,7 +467,7 @@ def _do_nelder_mead_fit(
     pcov = None
     try:
         _, pcov, _ = _do_lm_fit(circuit_string, popt.tolist(), lowers, uppers,
-                                  frequencies, Z, weighting)
+                                  frequencies, Z, weighting, should_stop)
     except Exception:
         pass
 
@@ -500,6 +530,7 @@ def fit_single(
     weighting: str = 'none',
     solver: str = 'lm',
     rs_estimate: float | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> FitResult:
     allowed_char = (set(column_map.characterization.keys()) if column_map else set()) | {'identifier', 'battery_id'}
     clean_char = {k: v for k, v in char_values.items() if k in allowed_char}
@@ -540,7 +571,7 @@ def fit_single(
                 # Single DE run (already global — no multi-start needed)
                 popt, pcov, Z_try = _do_diff_ev_fit(
                     variant_circuit, initials, lowers, uppers,
-                    frequencies, Z, weighting,
+                    frequencies, Z, weighting, should_stop,
                 )
                 best_popt, best_pcov, Z_fit = popt, pcov, Z_try
 
@@ -548,7 +579,7 @@ def fit_single(
                 # Single basin-hopping run (internally explores landscape)
                 popt, pcov, Z_try = _do_basin_hopping_fit(
                     variant_circuit, initials, lowers, uppers,
-                    frequencies, Z, weighting,
+                    frequencies, Z, weighting, should_stop,
                 )
                 best_popt, best_pcov, Z_fit = popt, pcov, Z_try
 
@@ -559,7 +590,7 @@ def fit_single(
                     try:
                         popt, pcov, Z_try = _do_nelder_mead_fit(
                             variant_circuit, guess, lowers, uppers,
-                            frequencies, Z, weighting,
+                            frequencies, Z, weighting, should_stop,
                         )
                         # Rank restarts by the same objective the solver minimised
                         obj = _fit_objective(Z, Z_try, weighting)
@@ -568,6 +599,8 @@ def fit_single(
                             best_popt = popt
                             best_pcov = pcov
                             Z_fit = Z_try
+                    except FitInterrupted:
+                        raise
                     except Exception:
                         continue
 
@@ -578,7 +611,7 @@ def fit_single(
                     try:
                         popt, pcov, Z_try = _do_lm_fit(
                             variant_circuit, guess, lowers, uppers,
-                            frequencies, Z, weighting,
+                            frequencies, Z, weighting, should_stop,
                         )
                         # Rank restarts by the same objective the solver minimised
                         obj = _fit_objective(Z, Z_try, weighting)
@@ -587,6 +620,8 @@ def fit_single(
                             best_popt = popt
                             best_pcov = pcov
                             Z_fit = Z_try
+                    except FitInterrupted:
+                        raise
                     except Exception:
                         continue
 
@@ -640,6 +675,8 @@ def fit_single(
                     circuit_used=variant_circuit,
                 )
 
+        except FitInterrupted:
+            raise   # cancellation/timeout — abort remaining variants immediately
         except Exception as exc:
             variants_tried.append(VariantResult(
                 circuit_string=variant_circuit,
@@ -754,12 +791,23 @@ async def fit_batch_stream(request: FitRequest) -> AsyncGenerator[str, None]:
     n_workers = min(os.cpu_count() or 4, 8, total)
     sem = asyncio.Semaphore(n_workers)
     queue: asyncio.Queue[str] = asyncio.Queue()
+    # Set when the client disconnects (Stop button / closed tab).  Worker
+    # threads poll it via should_stop() and unwind within milliseconds instead
+    # of computing a batch nobody is listening to.
+    cancel_event = threading.Event()
 
     async def _process_one(i: int, file_info) -> None:
         async with sem:
+            if cancel_event.is_set():
+                return
             queue.put_nowait(
                 json.dumps({'event': 'progress', 'file': file_info.filename, 'index': i, 'total': total})
             )
+            deadline = time.monotonic() + request.fit_timeout
+
+            def should_stop() -> bool:
+                return cancel_event.is_set() or time.monotonic() >= deadline
+
             try:
                 frequencies, Z, char_values = await asyncio.to_thread(
                     load_eis_data, file_info.path, request.column_map
@@ -789,23 +837,28 @@ async def fit_batch_stream(request: FitRequest) -> AsyncGenerator[str, None]:
                         frequencies = frequencies[inductive_mask]
                         Z = Z[inductive_mask]
 
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        fit_single,
-                        frequencies, Z,
-                        request.circuit_config,
-                        char_values,
-                        file_info.filename,
-                        file_info.path,
-                        request.optimize_config,
-                        request.column_map,
-                        request.weighting,
-                        request.solver,
-                        file_info.rs_estimate,
-                    ),
-                    timeout=request.fit_timeout,
+                # Cooperative timeout: the deadline is enforced inside the
+                # solver's objective evaluations (via should_stop), so the
+                # worker thread actually stops — asyncio.wait_for would only
+                # abandon it, leaving a zombie fit burning CPU and blocking a
+                # ThreadPoolExecutor slot for subsequent files.
+                result = await asyncio.to_thread(
+                    fit_single,
+                    frequencies, Z,
+                    request.circuit_config,
+                    char_values,
+                    file_info.filename,
+                    file_info.path,
+                    request.optimize_config,
+                    request.column_map,
+                    request.weighting,
+                    request.solver,
+                    file_info.rs_estimate,
+                    should_stop,
                 )
-            except asyncio.TimeoutError:
+            except FitInterrupted:
+                if cancel_event.is_set():
+                    return   # client gone — no one is listening
                 result = FitResult(
                     filename=file_info.filename, path=file_info.path,
                     success=False, error=f"Fit timed out after {request.fit_timeout:g} s",
@@ -821,12 +874,20 @@ async def fit_batch_stream(request: FitRequest) -> AsyncGenerator[str, None]:
 
     tasks = [asyncio.create_task(_process_one(i, fi)) for i, fi in enumerate(request.files)]
 
-    results_done = 0
-    while results_done < total:
-        msg = await queue.get()
-        yield f"data: {msg}\n\n"
-        if json.loads(msg)['event'] == 'result':
-            results_done += 1
+    try:
+        results_done = 0
+        while results_done < total:
+            msg = await queue.get()
+            yield f"data: {msg}\n\n"
+            if json.loads(msg)['event'] == 'result':
+                results_done += 1
 
-    await asyncio.gather(*tasks, return_exceptions=True)
-    yield f"data: {json.dumps({'event': 'done'})}\n\n"
+        yield f"data: {json.dumps({'event': 'done'})}\n\n"
+    finally:
+        # Runs on normal completion AND when the client disconnects (the
+        # server cancels this generator).  Signal the workers so in-flight
+        # solver threads abort at their next objective evaluation.
+        cancel_event.set()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
