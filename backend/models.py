@@ -147,6 +147,8 @@ class EnvelopeRequest(BaseModel):
     confidence: Dict[str, float]   # param name → 1σ
     frequencies: List[float]
     n_samples: int = 200
+    param_names: Optional[List[str]] = None                 # ordering for correlation matrix
+    correlation: Optional[List[List[float]]] = None         # p×p correlation from the fit
 
 
 class EnvelopeResponse(BaseModel):
