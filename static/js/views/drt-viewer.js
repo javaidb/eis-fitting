@@ -270,7 +270,10 @@ export function DRTView(container, { navigate, showToast }) {
 
   // ── File selection ────────────────────────────────────────────
   function handleFileSelect(file) {
-    if (getState().drtSelectedFile?.path === file.path) return;
+    const cached = _cache.get(file.path);
+    // Re-clicking the already-selected file is a no-op — unless its last
+    // computation failed, in which case the click acts as a retry.
+    if (getState().drtSelectedFile?.path === file.path && cached?.success !== false) return;
     setState({ drtSelectedFile: file });
 
     container.querySelectorAll('.drt-file-row').forEach(row => {
@@ -282,24 +285,18 @@ export function DRTView(container, { navigate, showToast }) {
 
     const lambda    = fileEffectiveLambda(file.path);
     const sliderVal = Math.log10(lambda).toFixed(3);
-    const cached    = _cache.get(file.path);
 
     rightEl.innerHTML = buildRightPanel(file, cached, lambda, sliderVal);
     wireControls();
 
     if (cached?.success) {
       requestAnimationFrame(() => plotDRT(cached));
-    } else {
-      // Result is computing via auto-run; show spinner; don't re-trigger
-      const alreadyInFlight = !cached;
-      if (alreadyInFlight) {
-        // Check if it has an error (not just pending)
-        if (cached?.success === false) {
-          computeAndShow(file);
-        }
-        // else: auto-run will update when done via refreshSelectedIfMatch
-      }
+    } else if (cached) {
+      // Previous computation failed — selecting the file retries it.
+      computeAndShow(file);
     }
+    // else: no result yet — the auto-run will populate the panel via
+    // refreshSelectedIfMatch when it finishes; don't double-trigger.
   }
 
   // ── Control wiring ────────────────────────────────────────────
