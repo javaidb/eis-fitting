@@ -56,6 +56,51 @@ def _solve_tikhonov(K: np.ndarray, L: np.ndarray, rhs: np.ndarray, lambda_reg: f
         return np.maximum(np.linalg.solve(A, K.T @ rhs), 0.0)
 
 
+def _solve_drt_system(
+    frequencies: np.ndarray,
+    Z: np.ndarray,
+    K_im: np.ndarray,
+    K_re: np.ndarray,
+    L: np.ndarray,
+    lambda_reg: float,
+    mode: str,
+) -> tuple[np.ndarray, float | None, float | None]:
+    """Solve the DRT in the requested mode.  Returns (gamma, r_inf, inductance).
+
+    'imag'    — imaginary-only kernel (r_inf/inductance are None).
+    'complex' — joint fit of both parts.  Unknowns x = [γ, R∞, L_series], all
+                ≥ 0, solved as one NNLS problem:
+                    Z'  = R∞ + K_re·γ
+                    −Z'' = K_im·γ − ω·L_series
+                Regularisation applies to γ only.  Using both parts doubles the
+                data constraining γ and makes the result robust to noise that
+                only corrupts one component.
+    """
+    if mode != 'complex':
+        return _solve_tikhonov(K_im, L, -Z.imag, lambda_reg), None, None
+
+    omega = 2 * np.pi * frequencies
+    n_f, n_tau = K_im.shape
+    n_reg = L.shape[0]
+
+    A = np.zeros((2 * n_f + n_reg, n_tau + 2))
+    A[:n_f, :n_tau]       = K_re
+    A[:n_f, n_tau]        = 1.0          # R∞ column (real part only)
+    A[n_f:2 * n_f, :n_tau] = K_im
+    A[n_f:2 * n_f, n_tau + 1] = -omega   # inductance column (imag part only)
+    A[2 * n_f:, :n_tau]   = np.sqrt(lambda_reg) * L
+    b = np.concatenate([Z.real, -Z.imag, np.zeros(n_reg)])
+
+    try:
+        x, _ = nnls(A, b, maxiter=10 * A.shape[1])
+    except RuntimeError:
+        # Fall back to a clipped ridge solution.
+        AtA = A.T @ A + 1e-12 * np.eye(A.shape[1])
+        x = np.maximum(np.linalg.solve(AtA, A.T @ b), 0.0)
+
+    return x[:n_tau], float(x[n_tau]), float(x[n_tau + 1])
+
+
 def _merge_nearby_peaks(log_tau: np.ndarray, gamma: np.ndarray, peaks: list[dict]) -> list[dict]:
     """Merge adjacent peaks that are not clearly separated in the spectrum.
 
@@ -122,15 +167,19 @@ def compute_drt(
     Z: np.ndarray,
     lambda_reg: float = 1e-3,
     n_tau: int = 100,
+    mode: str = 'imag',
 ) -> DRTResult:
-    log_tau, K_im, _, L = _build_kernel(frequencies, n_tau)
-    gamma = _solve_tikhonov(K_im, L, -Z.imag, lambda_reg)
+    log_tau, K_im, K_re, L = _build_kernel(frequencies, n_tau)
+    gamma, r_inf, inductance = _solve_drt_system(frequencies, Z, K_im, K_re, L, lambda_reg, mode)
     peaks = _fit_gaussian_peaks(log_tau, gamma)
     peaks = _merge_nearby_peaks(log_tau, gamma, peaks)
     return DRTResult(
         log_tau=log_tau.tolist(),
         gamma=gamma.tolist(),
         peaks=peaks,
+        mode=mode,
+        r_inf=r_inf,
+        inductance=inductance,
     )
 
 
@@ -196,7 +245,13 @@ def _consolidate_by_anchor(peaks: list[dict], anchor_taus: list[float]) -> list[
     return sorted(out, key=lambda p: p["log_tau_center"])
 
 
-def _enrich_peaks(result: DRTResult, frequencies: np.ndarray, Z: np.ndarray, lambda_opt: float) -> None:
+def _enrich_peaks(
+    result: DRTResult,
+    frequencies: np.ndarray,
+    Z: np.ndarray,
+    lambda_opt: float,
+    mode: str = 'imag',
+) -> None:
     """Mutates result.peaks in-place; populates result.lambda_variants.
 
     Per-peak fields added:
@@ -213,12 +268,14 @@ def _enrich_peaks(result: DRTResult, frequencies: np.ndarray, Z: np.ndarray, lam
     n_tau = len(result.log_tau)
     log_tau, K_im, K_re, L = _build_kernel(frequencies, n_tau)
     log_tau_arr = np.array(log_tau)
-    z_imag = -Z.imag
 
+    # λ variants use the same solve mode as the main spectrum so the stability
+    # overlay compares like with like.
     variant_mults = [0.01, 0.1, 10.0, 100.0]
     variant_gammas: list[np.ndarray] = []
     for mult in variant_mults:
-        variant_gammas.append(_solve_tikhonov(K_im, L, z_imag, lambda_opt * mult))
+        g, _, _ = _solve_drt_system(frequencies, Z, K_im, K_re, L, lambda_opt * mult, mode)
+        variant_gammas.append(g)
 
     r_inf = float(Z.real[np.argmax(frequencies)])
     gamma_re = _solve_tikhonov(K_re, L, Z.real - r_inf, lambda_opt)
@@ -373,9 +430,9 @@ async def compute_drt_for_file(request: DRTSingleRequest) -> DRTResult:
             load_eis_data, request.file.path, request.column_map
         )
         result = await asyncio.to_thread(
-            compute_drt, frequencies, Z, request.lambda_reg
+            compute_drt, frequencies, Z, request.lambda_reg, 100, request.mode
         )
-        await asyncio.to_thread(_enrich_peaks, result, frequencies, Z, request.lambda_reg)
+        await asyncio.to_thread(_enrich_peaks, result, frequencies, Z, request.lambda_reg, request.mode)
         result.filename = request.file.filename
         result.path     = request.file.path
         result.success  = True
@@ -393,21 +450,28 @@ def compute_lcurve_data(
     n_lambda: int = 30,
     lambda_min: float = 1e-7,
     lambda_max: float = 10.0,
+    mode: str = 'imag',
 ):
     """Compute L-curve: residual norm vs solution norm across λ values.
     Returns dict with points, optimal_lambda, optimal_index.
     Corner is detected via the triangle method in normalised log-log space."""
-    z_imag = -Z.imag
-    _, K, _, L = _build_kernel(frequencies)
+    _, K_im, K_re, L = _build_kernel(frequencies)
+    omega = 2 * np.pi * frequencies
 
     lambdas = np.logspace(np.log10(lambda_min), np.log10(lambda_max), n_lambda)
 
     points = []
     for lam in lambdas:
-        gamma = _solve_tikhonov(K, L, z_imag, lam)
+        gamma, r_inf, induct = _solve_drt_system(frequencies, Z, K_im, K_re, L, lam, mode)
+        if mode == 'complex':
+            res_re = (r_inf + K_re @ gamma) - Z.real
+            res_im = (K_im @ gamma - omega * induct) - (-Z.imag)
+            residual = float(np.sqrt(np.sum(res_re ** 2) + np.sum(res_im ** 2)))
+        else:
+            residual = float(np.linalg.norm(K_im @ gamma - (-Z.imag)))
         points.append({
             "lambda_val":    float(lam),
-            "residual_norm": float(np.linalg.norm(K @ gamma - z_imag)),
+            "residual_norm": residual,
             "solution_norm": float(np.linalg.norm(L @ gamma)),
         })
 
@@ -432,17 +496,17 @@ def compute_lcurve_data(
     }
 
 
-async def compute_drt_auto_for_file(file_info, column_map) -> dict:
+async def compute_drt_auto_for_file(file_info, column_map, mode: str = 'imag') -> dict:
     """Load data once, find optimal λ via L-curve, compute DRT at that λ."""
     try:
         frequencies, Z, char_values = await asyncio.to_thread(
             load_eis_data, file_info.path, column_map
         )
-        lcurve = await asyncio.to_thread(compute_lcurve_data, frequencies, Z)
+        lcurve = await asyncio.to_thread(compute_lcurve_data, frequencies, Z, 30, 1e-7, 10.0, mode)
         optimal_lambda = lcurve["optimal_lambda"]
 
-        result = await asyncio.to_thread(compute_drt, frequencies, Z, optimal_lambda)
-        await asyncio.to_thread(_enrich_peaks, result, frequencies, Z, optimal_lambda)
+        result = await asyncio.to_thread(compute_drt, frequencies, Z, optimal_lambda, 100, mode)
+        await asyncio.to_thread(_enrich_peaks, result, frequencies, Z, optimal_lambda, mode)
         result.filename   = file_info.filename
         result.path       = file_info.path
         result.success    = True
@@ -465,7 +529,9 @@ async def compute_lcurve_for_file(request: LCurveRequest) -> dict:
         frequencies, Z, _ = await asyncio.to_thread(
             load_eis_data, request.file.path, request.column_map
         )
-        result = await asyncio.to_thread(compute_lcurve_data, frequencies, Z)
+        result = await asyncio.to_thread(
+            compute_lcurve_data, frequencies, Z, 30, 1e-7, 10.0, request.mode
+        )
         return {"success": True, **result}
     except Exception as exc:
         tb = traceback.format_exc()
@@ -483,7 +549,7 @@ async def drt_batch_stream(request: DRTRequest) -> AsyncGenerator[str, None]:
                 load_eis_data, file_info.path, request.column_map
             )
             result = await asyncio.to_thread(
-                compute_drt, frequencies, Z, request.lambda_reg
+                compute_drt, frequencies, Z, request.lambda_reg, 100, request.mode
             )
             result.filename = file_info.filename
             result.path     = file_info.path
