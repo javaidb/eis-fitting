@@ -6,11 +6,18 @@ const PEAK_COLORS = [
   '#9b59b6', '#1abc9c', '#f1c40f', '#e91e63',
 ];
 
+// Heuristic τ-range → process assignment (typical Li-ion cell, room temperature).
+// These boundaries shift with temperature, SOC, and chemistry — presented in the
+// UI as hints ("Process*" + footnote), never as facts.
 const MECHANISMS = [
-  { key: 'fast', label: 'R₀',              tauMax: 5e-3,     color: '#e05c5c' },
-  { key: 'sei',  label: 'SEI',             tauMax: 0.1,      color: '#e67e22' },
-  { key: 'mid',  label: 'Charge Transfer', tauMax: 1.0,      color: '#4a9ade' },
-  { key: 'slow', label: 'Diffusion',       tauMax: Infinity, color: '#27ae60' },
+  { key: 'fast', label: 'HF / contact',    tauMax: 5e-3,     color: '#e05c5c',
+    hint: 'τ < 5 ms — typically series/contact effects or measurement artifacts' },
+  { key: 'sei',  label: 'SEI',             tauMax: 0.1,      color: '#e67e22',
+    hint: '5 ms – 0.1 s — often SEI film response in Li-ion cells' },
+  { key: 'mid',  label: 'Charge Transfer', tauMax: 1.0,      color: '#4a9ade',
+    hint: '0.1 – 1 s — often interfacial charge transfer' },
+  { key: 'slow', label: 'Diffusion',       tauMax: Infinity, color: '#27ae60',
+    hint: 'τ > 1 s — diffusion-dominated processes' },
 ];
 
 function categorizePeak(peak) {
@@ -756,7 +763,7 @@ export function DRTView(container, { navigate, showToast }) {
     }
     const avgR2 = result.peaks.reduce((s, p) => s + p.r2, 0) / n;
     if (n > 5 && avgR2 < 0.7) {
-      return `<div class="drt-quality-hint drt-hint-warn">${n} low-quality peaks (avg R²&nbsp;${(avgR2 * 100).toFixed(0)}%) — λ may be too low</div>`;
+      return `<div class="drt-quality-hint drt-hint-warn">${n} low-quality peaks (avg shape match&nbsp;${(avgR2 * 100).toFixed(0)}%) — λ may be too low</div>`;
     }
     return '';
   }
@@ -805,7 +812,7 @@ export function DRTView(container, { navigate, showToast }) {
           <td style="color:${color};font-weight:600;">${i + 1}${mergedBadge}</td>
           <td style="font-family:monospace;">${fmtTau(p.tau_center)}</td>
           ${enrichCells}
-          <td style="color:var(--text-muted);">${mech.label}</td>
+          <td style="color:var(--text-muted);" title="${escHtml(mech.hint)}">${mech.label}</td>
           <td style="color:${r2color};">${(p.r2 * 100).toFixed(0)}%</td>
           <td style="color:var(--text-muted);">σ = ${p.sigma.toFixed(2)}</td>
         </tr>`;
@@ -818,9 +825,12 @@ export function DRTView(container, { navigate, showToast }) {
     return `
       <div class="drt-peaks-label">Detected Peaks</div>
       <table class="drt-peaks-table">
-        <thead><tr><th>#</th><th>τ</th>${enrichHeaders}<th>Process</th><th>R²</th><th>Width</th></tr></thead>
+        <thead><tr><th>#</th><th>τ</th>${enrichHeaders}<th title="Typical assignment by τ range — heuristic, not a measurement">Process*</th><th title="Gaussian shape-match score (1 − RMSE/peak height) — not a statistical R²">Shape</th><th>Width</th></tr></thead>
         <tbody>${rows}</tbody>
-      </table>`;
+      </table>
+      <div style="font-size:10px;color:var(--text-dim);margin-top:4px;">
+        * Process = τ-range heuristic (typical Li-ion, room temperature) — boundaries shift with temperature, SOC, and chemistry.
+      </div>`;
   }
 
   // ── Peak-distribution stats ───────────────────────────────────
