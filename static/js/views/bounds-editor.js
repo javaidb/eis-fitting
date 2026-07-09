@@ -15,6 +15,14 @@ const DEFAULTS_WO = [
   { initial: 100,  lower: 0,   upper: null  },  // R
   { initial: 1.0,  lower: 0,   upper: null  },  // τ
 ];
+const DEFAULTS_LA = [
+  { initial: 1e-6, lower: 0,   upper: null  },  // L
+  { initial: 1.0,  lower: 0,   upper: 1.0   },  // α
+];
+const DEFAULTS_G = [
+  { initial: 0.01, lower: 0,   upper: null  },  // R_G
+  { initial: 1.0,  lower: 0,   upper: null  },  // t_G
+];
 
 function checkPhysical(name, value) {
   if (/^R\d/.test(name)  && value < 0)          return 'negative resistance';
@@ -23,15 +31,21 @@ function checkPhysical(name, value) {
   if (/^L\d/.test(name)  && value < 0)           return 'negative inductance';
   if (/^CPE\d+_1/.test(name) && (value < 0 || value > 1)) return 'α outside 0–1';
   if (/^(Wo|Ws|W)\d/.test(name) && value < 0)   return 'negative Warburg';
+  if (/^La\d+_1/.test(name) && (value < 0 || value > 1)) return 'α outside 0–1';
+  if (/^G\d/.test(name)  && value < 0)           return 'negative Gerischer';
   return null;
 }
 
 function guessDefault(paramName) {
-  // paramName examples: R0, C1, CPE0_0, CPE0_1, Wo1_0, Wo1_1, W2, L0
+  // paramName examples: R0, C1, CPE0_0, CPE0_1, Wo1_0, Wo1_1, W2, L0, La0_0, G1_1
   if (/^CPE\d+_0/i.test(paramName)) return DEFAULTS_CPE[0];
   if (/^CPE\d+_1/i.test(paramName)) return DEFAULTS_CPE[1];
   if (/^Wo\d+_0|^Ws\d+_0/i.test(paramName)) return DEFAULTS_WO[0];
   if (/^Wo\d+_1|^Ws\d+_1/i.test(paramName)) return DEFAULTS_WO[1];
+  if (/^La\d+_0/i.test(paramName)) return DEFAULTS_LA[0];
+  if (/^La\d+_1/i.test(paramName)) return DEFAULTS_LA[1];
+  if (/^G\d+_0/i.test(paramName))  return DEFAULTS_G[0];
+  if (/^G\d+_1/i.test(paramName))  return DEFAULTS_G[1];
   const el = paramName.match(/^([A-Za-z]+)/)?.[1]?.toUpperCase();
   return DEFAULTS[el] || { initial: 0.01, lower: 0, upper: null };
 }
@@ -65,19 +79,24 @@ export function BoundsEditorView(container, { navigate, showToast }) {
     const cfg = state.circuitConfig;
     const rows = paramInfo.map((p, i) => {
       const def = guessDefault(p.name);
+      const lower = cfg?.lower_bounds?.[i] ?? def.lower;
+      const upper = cfg?.upper_bounds?.[i] ?? def.upper;
       return {
         name: p.name,
         unit: p.unit,
         initial: cfg?.initial_guess?.[i] ?? def.initial,
-        lower:   cfg?.lower_bounds?.[i]  ?? def.lower,
-        upper:   cfg?.upper_bounds?.[i]  ?? def.upper,
+        lower,
+        upper,
+        // A saved config with lower == upper means the parameter was fixed.
+        fixed: lower != null && upper != null && lower === upper,
       };
     });
 
     container.innerHTML = `
       <div class="section-header">Set Bounds</div>
       <div class="section-sub">Configure initial guesses and search bounds for each parameter.
-        Leave <em>Max</em> blank for no upper bound.</div>
+        Leave <em>Max</em> blank for no upper bound.
+        Check <em>Fix</em> to pin a parameter at its initial value (excluded from optimization).</div>
 
       <div class="card">
         <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
@@ -92,6 +111,7 @@ export function BoundsEditorView(container, { navigate, showToast }) {
               <th>Initial Value</th>
               <th>Min</th>
               <th>Max</th>
+              <th title="Pin at the initial value — not optimized">Fix</th>
             </tr>
           </thead>
           <tbody id="bounds-tbody">
@@ -100,8 +120,9 @@ export function BoundsEditorView(container, { navigate, showToast }) {
                 <td><code style="color:var(--accent); font-size:13px;">${r.name}</code></td>
                 <td style="color:var(--text-muted); font-size:12px;">${r.unit}</td>
                 <td><input type="number" class="initial-val" data-i="${i}" value="${r.initial}" step="any"></td>
-                <td><input type="number" class="lower-val"   data-i="${i}" value="${r.lower}"   step="any"></td>
-                <td><input type="number" class="upper-val"   data-i="${i}" value="${fmtBound(r.upper)}" step="any" placeholder="∞"></td>
+                <td><input type="number" class="lower-val"   data-i="${i}" value="${r.fixed ? '' : r.lower}" step="any" ${r.fixed ? 'disabled' : ''}></td>
+                <td><input type="number" class="upper-val"   data-i="${i}" value="${r.fixed ? '' : fmtBound(r.upper)}" step="any" placeholder="∞" ${r.fixed ? 'disabled' : ''}></td>
+                <td style="text-align:center;"><input type="checkbox" class="fix-cb" data-i="${i}" ${r.fixed ? 'checked' : ''} style="accent-color:var(--accent);cursor:pointer;"></td>
               </tr>
             `).join('')}
           </tbody>
@@ -119,8 +140,28 @@ export function BoundsEditorView(container, { navigate, showToast }) {
       paramInfo.forEach((p, i) => {
         const def = guessDefault(p.name);
         container.querySelector(`.initial-val[data-i="${i}"]`).value = def.initial;
-        container.querySelector(`.lower-val[data-i="${i}"]`).value   = def.lower;
-        container.querySelector(`.upper-val[data-i="${i}"]`).value   = def.upper ?? '';
+        const lowerEl = container.querySelector(`.lower-val[data-i="${i}"]`);
+        const upperEl = container.querySelector(`.upper-val[data-i="${i}"]`);
+        const fixCb   = container.querySelector(`.fix-cb[data-i="${i}"]`);
+        fixCb.checked = false;
+        lowerEl.disabled = upperEl.disabled = false;
+        lowerEl.value = def.lower;
+        upperEl.value = def.upper ?? '';
+      });
+    });
+
+    container.querySelectorAll('.fix-cb').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const i = cb.dataset.i;
+        const lowerEl = container.querySelector(`.lower-val[data-i="${i}"]`);
+        const upperEl = container.querySelector(`.upper-val[data-i="${i}"]`);
+        lowerEl.disabled = upperEl.disabled = cb.checked;
+        if (cb.checked) { lowerEl.value = ''; upperEl.value = ''; }
+        else {
+          const def = guessDefault(paramInfo[i].name);
+          lowerEl.value = def.lower;
+          upperEl.value = def.upper ?? '';
+        }
       });
     });
 
@@ -131,12 +172,20 @@ export function BoundsEditorView(container, { navigate, showToast }) {
 
       paramInfo.forEach((_, i) => {
         const iv = parseFloat(container.querySelector(`.initial-val[data-i="${i}"]`).value);
+        if (isNaN(iv)) { valid = false; }
+        initial_guess.push(iv);
+
+        // Fixed parameter: lower == upper == initial signals the backend to
+        // pin it at that value and exclude it from the optimization vector.
+        if (container.querySelector(`.fix-cb[data-i="${i}"]`).checked) {
+          lower_bounds.push(iv);
+          upper_bounds.push(iv);
+          return;
+        }
+
         const lo = parseFloat(container.querySelector(`.lower-val[data-i="${i}"]`).value);
         const upRaw = container.querySelector(`.upper-val[data-i="${i}"]`).value.trim();
         const up = upRaw === '' ? null : parseFloat(upRaw);
-
-        if (isNaN(iv)) { valid = false; }
-        initial_guess.push(iv);
         lower_bounds.push(isNaN(lo) ? 0 : lo);
         upper_bounds.push(up);
       });
