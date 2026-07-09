@@ -98,12 +98,14 @@ export function TrendsView(container, { navigate, showToast }) {
     const savedY        = state2._trendsY || paramNames.slice(0, Math.min(paramNames.length, 4));
     const charUnits     = state2.charUnits || {};
 
-    // Map battery_id value → raw subfolder name for legend labels
+    // Map battery_id value → raw subfolder name for legend labels.
+    // Derive from the result's own path — index alignment with state.files
+    // breaks when a stopped run leaves gaps in fitResults.
     const batteryLabels = {};
-    (state2.fitResults || []).forEach((r, i) => {
+    (state2.fitResults || []).forEach(r => {
       const bid = r.characterization?.battery_id;
-      if (bid != null && (state2.files || [])[i]) {
-        const parts = (state2.files[i].path || '').replace(/\\/g, '/').split('/');
+      if (bid != null && r.path) {
+        const parts = String(r.path).replace(/\\/g, '/').split('/');
         const sub = parts.length >= 2 ? parts[parts.length - 2] : '';
         if (sub) batteryLabels[String(bid)] = sub;
       }
