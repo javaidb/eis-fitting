@@ -135,11 +135,17 @@ def _extract_char_values(
     return char_values
 
 
+def _skiprows(column_map: ColumnMap):
+    """Rows to skip when reading data. When skip_first_data_row is set, drop the
+    first line after the header (line index 1) — e.g. a units row."""
+    return [1] if column_map.skip_first_data_row else None
+
+
 def load_eis_data(
     filepath: str,
     column_map: ColumnMap,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Union[float, str]]]:
-    df = pd.read_csv(filepath)
+    df = pd.read_csv(filepath, skiprows=_skiprows(column_map))
 
     frequencies = df[column_map.frequency].to_numpy(dtype=float)
     z_real      = df[column_map.real_z].to_numpy(dtype=float)
@@ -165,7 +171,7 @@ def characterize_files(files, column_map) -> list:
     results = []
     for f in files:
         try:
-            df = pd.read_csv(f.path)
+            df = pd.read_csv(f.path, skiprows=_skiprows(column_map))
             char_values = _extract_char_values(df, f.path, column_map)
             results.append({"path": f.path, "characterization": char_values})
         except Exception:
