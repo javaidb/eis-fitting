@@ -175,6 +175,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
     const realZ  = cm.real_z     || roles.real_z     || '';
     const imagZ  = cm.imag_z     || roles.imag_z     || '';
     const negate = cm.negate_imag ?? false;
+    const skipFirstRow = cm.skip_first_data_row ?? false;
 
     container.innerHTML = `
       <div class="section-header">Map Columns</div>
@@ -204,6 +205,10 @@ export function ColumnMapperView(container, { navigate, showToast }) {
         <div class="toggle-row" style="margin-top:12px;">
           <input type="checkbox" id="negate-imag" ${negate ? 'checked' : ''}>
           <label class="toggle-label" for="negate-imag">Negate imaginary values (if stored as positive Z″)</label>
+        </div>
+        <div class="toggle-row" style="margin-top:8px;">
+          <input type="checkbox" id="skip-first-row" ${skipFirstRow ? 'checked' : ''}>
+          <label class="toggle-label" for="skip-first-row">Skip first data row after header (e.g. a units row)</label>
         </div>
       </div>
 
@@ -261,6 +266,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
       const real_z      = container.querySelector('#col-real-z').value;
       const imag_z      = container.querySelector('#col-imag-z').value;
       const negate_imag = container.querySelector('#negate-imag').checked;
+      const skip_first_data_row = container.querySelector('#skip-first-row').checked;
 
       if (!frequency || !real_z || !imag_z) {
         showToast('Please select frequency, real Z, and imaginary Z columns.', 'error');
@@ -300,7 +306,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
       });
 
       setState({
-        columnMap: { frequency, real_z, imag_z, negate_imag, characterization, per_battery_characterization },
+        columnMap: { frequency, real_z, imag_z, negate_imag, skip_first_data_row, characterization, per_battery_characterization },
         charUnits: newCharUnits,
         charDecimalPlaces: newCharDecimalPlaces,
         maxStep: Math.max(getState().maxStep, 4),
