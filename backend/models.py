@@ -27,6 +27,7 @@ class ColumnMap(BaseModel):
     real_z: str
     imag_z: str
     negate_imag: bool = False
+    skip_first_data_row: bool = False                       # skip the row after the header (e.g. a units row)
     characterization: Dict[str, str]                        # label -> col_name (global fallback)
     per_battery_characterization: Dict[str, Dict[str, str]] = {}  # label -> {battery_id_str -> col_name}
     decimal_places: Dict[str, int] = {}                     # label -> decimals to round to
