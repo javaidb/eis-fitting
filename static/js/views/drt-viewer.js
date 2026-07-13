@@ -401,7 +401,7 @@ export function DRTView(container, { navigate, showToast }) {
     try {
       const result = await computeDRTAuto({
         file,
-        column_map: getState().columnMap,
+        column_map: { ...getState().columnMap, decimal_places: getState().charDecimalPlaces ?? {} },
         mode: getState().drtMode ?? 'imag',
       });
       if (_autoRunGen !== gen) return;
@@ -514,7 +514,7 @@ export function DRTView(container, { navigate, showToast }) {
     try {
       const data = await computeLCurve({
         file,
-        column_map: state.columnMap,
+        column_map: { ...state.columnMap, decimal_places: state.charDecimalPlaces ?? {} },
         mode: state.drtMode ?? 'imag',
       });
 
@@ -661,7 +661,7 @@ export function DRTView(container, { navigate, showToast }) {
     try {
       const result = await computeDRTSingle({
         file,
-        column_map: state.columnMap,
+        column_map: { ...state.columnMap, decimal_places: state.charDecimalPlaces ?? {} },
         lambda_reg: lambda,
         mode: state.drtMode ?? 'imag',
       });
