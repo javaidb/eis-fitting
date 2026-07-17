@@ -112,6 +112,11 @@ class CharacterizeRequest(BaseModel):
     column_map: ColumnMap
 
 
+class SpectrumRequest(BaseModel):
+    path: str
+    column_map: ColumnMap
+
+
 class DRTRequest(BaseModel):
     files: List[FileInfo]
     column_map: ColumnMap
