@@ -34,12 +34,39 @@ VIEWS.forEach(({ step, el, factory }) => {
 });
 
 // ── Navigation ───────────────────────────────────────────────────
+const STEP_LABELS = { 1: 'Load Files', 2: 'Map Columns', 3: 'DRT', 4: 'Build Circuit', 5: 'Set Bounds', 6: 'Fit', 7: 'Trends' };
+const globalNextBtn = document.getElementById('global-next-btn');
+
+function updateGlobalNext(step) {
+  if (step >= 7) { globalNextBtn.style.display = 'none'; return; }
+  globalNextBtn.style.display = '';
+  globalNextBtn.textContent = `Next: ${STEP_LABELS[step + 1]} →`;
+}
+
+// Proxy to the active view's own Next button so per-step validation and
+// state commits (e.g. Map Columns building the columnMap) still run.
+globalNextBtn.addEventListener('click', () => {
+  const step = getState().step;
+  if (step >= 7) return;
+  const view = VIEWS.find(v => v.step === step);
+  const viewNext = view?.el.querySelector('#next-btn');
+  if (viewNext) {
+    if (viewNext.disabled) { showToast('Complete this step before continuing.', 'error'); return; }
+    viewNext.click();
+  } else if (step + 1 <= getState().maxStep) {
+    navigate(step + 1);
+  } else {
+    showToast('Complete this step before continuing.', 'error');
+  }
+});
+
 export function navigate(step) {
   const state = getState();
   if (step > state.maxStep) return;
 
   const prev = state.step;
   setState({ step });
+  updateGlobalNext(step);
 
   VIEWS.forEach(({ step: s, el }) => {
     el.classList.toggle('active', s === step);
@@ -80,6 +107,7 @@ function saveProject() {
   const project = {
     version:            1,
     files:              s.files,
+    discardedFiles:     s.discardedFiles,
     columnMap:          s.columnMap,
     charUnits:          s.charUnits,
     charDecimalPlaces:  s.charDecimalPlaces,
@@ -111,6 +139,7 @@ function loadProject(file) {
       if (!proj.version) throw new Error('Not a valid EIS project file');
       setState({
         files:              proj.files              ?? [],
+        discardedFiles:     proj.discardedFiles     ?? [],
         columnMap:          proj.columnMap          ?? null,
         charUnits:          proj.charUnits          ?? {},
         charDecimalPlaces:  proj.charDecimalPlaces  ?? {},
