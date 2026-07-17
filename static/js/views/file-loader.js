@@ -21,6 +21,7 @@ export function FileLoaderView(container, { navigate, showToast }) {
 
     <div id="file-list-card" class="card" style="display:none;">
       <div class="card-title">Found Files <span id="file-count" class="chip"></span></div>
+      <input type="text" id="file-filter" class="file-filter" placeholder="🔍 Filter files by keyword…">
       <div class="file-list" id="file-list"></div>
     </div>
 
@@ -34,6 +35,7 @@ export function FileLoaderView(container, { navigate, showToast }) {
   const browseBtn   = container.querySelector('#browse-btn');
   const scanBtn     = container.querySelector('#scan-btn');
   const fileListCard = container.querySelector('#file-list-card');
+  const fileFilter  = container.querySelector('#file-filter');
   const fileList    = container.querySelector('#file-list');
   const fileCount   = container.querySelector('#file-count');
   const nextBtn     = container.querySelector('#next-btn');
@@ -41,7 +43,7 @@ export function FileLoaderView(container, { navigate, showToast }) {
   // Restore saved path
   const saved = getState();
   if (saved.folderPath) folderInput.value = saved.folderPath;
-  if (saved.files?.length) renderFiles(saved.files);
+  if (saved.files?.length) renderFiles();
 
   browseBtn.addEventListener('click', async () => {
     browseBtn.disabled = true;
@@ -76,10 +78,12 @@ export function FileLoaderView(container, { navigate, showToast }) {
       setState({
         folderPath: path,
         files: data.files,
+        discardedFiles: [],   // fresh scan resets any excluded files
         detectedRoles: data.detected_roles,
         maxStep: Math.max(getState().maxStep, 2),
       });
-      renderFiles(data.files);
+      fileFilter.value = '';
+      renderFiles();
       showToast(`Found ${data.files.length} file(s).`, 'success');
     } catch (err) {
       showToast(err.message, 'error');
@@ -91,19 +95,56 @@ export function FileLoaderView(container, { navigate, showToast }) {
 
   nextBtn.addEventListener('click', () => navigate(2));
 
-  function renderFiles(files) {
-    if (!files.length) { fileListCard.style.display = 'none'; return; }
+  fileFilter.addEventListener('input', () => renderFiles());
+
+  fileList.addEventListener('click', e => {
+    const btn = e.target.closest('.file-item-remove');
+    if (!btn) return;
+    removeFile(decodeURIComponent(btn.dataset.path));
+  });
+
+  function removeFile(path) {
+    const s = getState();
+    const files = (s.files || []).filter(f => f.path !== path);
+    const removed = (s.files || []).find(f => f.path === path);
+    const kkData = { ...s.kkData };
+    delete kkData[path];
+    setState({
+      files,
+      // Drop any per-file results so downstream steps stay consistent.
+      fitResults: (s.fitResults || []).filter(r => r?.path !== path),
+      drtResults: (s.drtResults || []).filter(r => r?.path !== path),
+      kkData,
+      drtSelectedFile: s.drtSelectedFile?.path === path ? null : s.drtSelectedFile,
+    });
+    renderFiles();
+    showToast(`Removed ${removed?.filename ?? 'file'} from analysis.`, 'success');
+  }
+
+  function renderFiles() {
+    const files = getState().files || [];
+    if (!files.length) {
+      fileListCard.style.display = 'none';
+      nextBtn.disabled = true;
+      return;
+    }
+
+    const keyword = fileFilter.value.trim().toLowerCase();
+    const shown = keyword
+      ? files.filter(f => f.filename.toLowerCase().includes(keyword))
+      : files;
 
     fileListCard.style.display = '';
-    fileCount.textContent = files.length;
-    fileList.innerHTML = files.map(f => `
+    fileCount.textContent = keyword ? `${shown.length} / ${files.length}` : files.length;
+    fileList.innerHTML = shown.length ? shown.map(f => `
       <div class="file-item">
         <span style="color:var(--accent); font-size:16px;">📄</span>
         <span class="file-item-name">${f.filename}</span>
         <span class="file-item-meta">${f.columns.length} cols · ${f.row_count} rows</span>
         <span class="chip" style="font-size:10px;">${f.columns.slice(0,3).join(', ')}${f.columns.length > 3 ? '…' : ''}</span>
+        <button class="file-item-remove" data-path="${encodeURIComponent(f.path)}" title="Remove from analysis">✕</button>
       </div>
-    `).join('');
+    `).join('') : '<div class="file-list-empty">No files match this keyword.</div>';
     nextBtn.disabled = false;
   }
 
@@ -111,7 +152,7 @@ export function FileLoaderView(container, { navigate, showToast }) {
     onEnter() {
       const s = getState();
       if (s.folderPath) folderInput.value = s.folderPath;
-      if (s.files?.length) renderFiles(s.files);
+      renderFiles();
       nextBtn.disabled = !(s.files?.length);
     }
   };
