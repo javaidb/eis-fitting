@@ -1,17 +1,43 @@
 from __future__ import annotations
 import asyncio
+import os
+import uuid
+from pathlib import Path
+
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.drt import compute_drt_auto_for_file, compute_drt_for_file, compute_lcurve_for_file, drt_batch_stream
-from backend.file_handler import characterize_files, scan_folder
+from backend.file_handler import characterize_files, load_eis_data, scan_folder
 from backend.fitting import compute_fit_envelope, fit_batch_stream, get_param_names
 from backend.kk import kk_batch_stream
-from backend.models import CharacterizeRequest, DRTRequest, DRTSingleRequest, EnvelopeRequest, EnvelopeResponse, FitRequest, FreqRangeRequest, KKRequest, LCurveRequest, ParseCircuitRequest, ScanFolderRequest
+from backend.models import CharacterizeRequest, DRTRequest, DRTSingleRequest, EnvelopeRequest, EnvelopeResponse, FitRequest, FreqRangeRequest, KKRequest, LCurveRequest, ParseCircuitRequest, ScanFolderRequest, SpectrumRequest
 
 app = FastAPI(title="EIS Fitting")
+
+# Identity of this exact server instance. The launcher (launch.ps1) generates a
+# fresh EIS_BOOT_ID per run and refuses to open the browser until the server on
+# port 8000 echoes it back — so a stale process from an old checkout can never
+# masquerade as the freshly launched one.
+BOOT_ID = os.environ.get("EIS_BOOT_ID") or uuid.uuid4().hex
+APP_DIR = Path(__file__).resolve().parent
+
+
+@app.get("/api/health")
+async def api_health():
+    return {"boot_id": BOOT_ID, "app_dir": str(APP_DIR), "pid": os.getpid()}
+
+
+@app.middleware("http")
+async def no_stale_cache(request, call_next):
+    response = await call_next(request)
+    # Browsers heuristically cache assets served without Cache-Control, which
+    # can pin old JS/CSS for days. no-cache forces revalidation (cheap 304s).
+    if request.method == "GET" and not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 CIRCUIT_ELEMENTS = [
     {"symbol": "R",   "name": "Resistor",                  "n_params": 1, "color": "#e05c5c",
@@ -130,6 +156,21 @@ async def api_freq_range(request: FreqRangeRequest):
 async def api_characterize(request: CharacterizeRequest):
     try:
         return characterize_files(request.files, request.column_map)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/spectrum")
+async def api_spectrum(request: SpectrumRequest):
+    """Raw impedance spectrum for one file under a given column mapping — used
+    by the Map Columns preview to sanity-check the mapping via a Nyquist plot."""
+    try:
+        frequencies, Z, _ = await asyncio.to_thread(load_eis_data, request.path, request.column_map)
+        return {
+            "frequencies": frequencies.tolist(),
+            "z_real": Z.real.tolist(),
+            "z_imag": Z.imag.tolist(),
+        }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
