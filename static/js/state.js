@@ -7,6 +7,7 @@ const _defaults = {
   maxStep: 1,       // highest step unlocked
   folderPath: '',
   files: [],
+  discardedFiles: [],  // excluded from analysis but still shown (greyed) in previews
   detectedRoles: {},
   columnMap: null,
   circuitTree: { nodes: [] },
