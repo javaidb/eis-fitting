@@ -41,6 +41,10 @@ export function characterizeFiles(request) {
   return post('/api/characterize', request);
 }
 
+export function getSpectrum(request) {
+  return post('/api/spectrum', request);
+}
+
 export function computeDRTSingle(request) {
   return post('/api/drt-single', request);
 }
