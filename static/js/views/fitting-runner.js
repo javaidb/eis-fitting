@@ -1,5 +1,6 @@
 import { getState, setState } from '../state.js';
 import { characterizeFiles, streamFitting, streamKK } from '../api.js';
+import { guessDefault } from './bounds-editor.js';
 
 const GOOD_THRESHOLD = 0.05;
 
@@ -60,8 +61,9 @@ function configKey(state) {
     freqMax:  state.fitFreqMax ?? null,
     weight:          state.fitWeighting ?? 'none',
     solver:          state.fitSolver ?? 'lm',
-    omitInductive:   state.omitInductive ?? false,
-    kkData:          state.kkData ?? {},  // per-file ranges change the fit — invalidate cache when KK reruns
+    omitInductive:    state.omitInductive ?? false,
+    excludeKKFlagged: state.excludeKKFlagged ?? true,
+    kkData:           state.kkData ?? {},  // flagged points change the fit — invalidate cache when KK reruns
   });
 }
 
@@ -84,6 +86,24 @@ function pathToSafeId(path) {
   return (path || '').replace(/[^a-zA-Z0-9]/g, '_');
 }
 
+// Circuit config to retain for one file after a run. In optimize mode the
+// search may settle on a different circuit than the configured frame — snapshot
+// the actual circuit with its fitted values as initials and default bounds.
+function perFileCircuitConfig(result, baseConfig) {
+  if (result.success && result.circuit_used && result.param_names?.length
+      && result.circuit_used !== baseConfig?.circuit_string) {
+    const defs = result.param_names.map(guessDefault);
+    return {
+      circuit_string: result.circuit_used,
+      param_names:    result.param_names,
+      initial_guess:  result.param_names.map((n, i) => result.parameters?.[n] ?? defs[i].initial),
+      lower_bounds:   defs.map(d => d.lower),
+      upper_bounds:   defs.map(d => d.upper),
+    };
+  }
+  return baseConfig;
+}
+
 // ── KK tile state helpers ──────────────────────────────────────────────────
 
 function kkTileState(kk) {
@@ -92,14 +112,25 @@ function kkTileState(kk) {
   return                                           { cls: 'kk-ok',   label: 'KK ✓' };
 }
 
+// Compact corner-badge variant shown on tiles that also have a fit result.
+function kkBadge(kk) {
+  if (!kk) return '';
+  const n = kk.flagged_indices?.length ?? 0;
+  const { cls, label, title } =
+    !kk.success ? { cls: 'kk-fail', label: '✗',      title: `KK failed${kk.error ? ': ' + kk.error : ''}` }
+    : n > 0     ? { cls: 'kk-warn', label: `⚠${n}`,  title: `KK: ${n} flagged point${n !== 1 ? 's' : ''}` }
+    :             { cls: 'kk-ok',   label: '✓',      title: 'KK compliant' };
+  return ` <span class="kk-badge ${cls}" title="${title}">${label}</span>`;
+}
+
 export function FittingRunnerView(container, { navigate, showToast }) {
   const resultMap = new Map();   // path → FitResult
   const charMap   = new Map();   // path → characterization
   const kkMap     = new Map();   // path → KKResult
 
-  // 'kk' when KK was the last operation run; 'fit' when fitting was last.
-  // Controls which state buildTile renders when both maps have data.
-  let _activeView = 'fit';
+  let _selectedPath = null;   // file shown in the detail panel
+  let _settingsOpen = false;  // settings drawer expanded?
+  let _activeTab    = null;   // detail tab id, remembered across file navigation
 
   let binByField = '';
   let sortByBest = false;
@@ -137,10 +168,24 @@ export function FittingRunnerView(container, { navigate, showToast }) {
       if (path) resultMap.set(path, r);
     });
 
-    const weighting      = state.fitWeighting ?? 'none';
-    const solver         = state.fitSolver ?? 'lm';
-    const omitInductive  = state.omitInductive ?? false;
-    const failedCount    = [...resultMap.values()].filter(r => r && !r.success).length;
+    // KK results persist in state so badges survive navigating away and back
+    kkMap.clear();
+    (state.kkResults || []).forEach(r => { if (r?.path) kkMap.set(r.path, r); });
+
+    const weighting        = state.fitWeighting ?? 'none';
+    const solver           = state.fitSolver ?? 'lm';
+    const omitInductive    = state.omitInductive ?? false;
+    const excludeKKFlagged = state.excludeKKFlagged ?? true;
+    const failedCount      = [...resultMap.values()].filter(r => r && !r.success).length;
+
+    // One-line digest of the drawer settings, shown next to the gear button
+    const weightLabels = { none: 'no weight', modulus: 'modulus', proportional: 'proportional' };
+    const solverLabels = { lm: 'LM', diff_ev: 'Diff. Evo.', basin_hop: 'Basin Hop', nelder_mead: 'Nelder-Mead' };
+    const freqPart = (state.fitFreqMin != null || state.fitFreqMax != null)
+      ? ` · ${state.fitFreqMin ?? '0'}–${state.fitFreqMax ?? '∞'} Hz` : '';
+    const settingsSummary =
+      `${state.fitTimeout ?? 60}s · ${weightLabels[weighting]} · ${solverLabels[solver]}${freqPart}` +
+      `${omitInductive ? ' · no inductive' : ''}${excludeKKFlagged ? ' · excl. KK⚠' : ''}`;
 
     container.innerHTML = `
       <div class="section-header">Fit</div>
@@ -156,111 +201,84 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         &nbsp;·&nbsp; ${files.length} file(s)
       </div>
 
-      <!-- Flow panel + standalone Trends button -->
-      <div class="fit-panel-row">
-
-        <!-- Three-step flow panel: KK → Configure → Fit -->
-        <div class="fit-flow-panel">
-
-          <!-- Back nav -->
-          <div class="flow-back-col">
-            <button class="btn btn-secondary" id="back-btn" title="Back to bounds editor">←</button>
-          </div>
-
-          <!-- Step 1: KK Check -->
-          <div class="flow-section">
-            <div class="flow-section-label">1 · KK Check</div>
-            <div class="flow-section-body">
-              <button class="btn btn-secondary" id="kk-run-btn" ${!ready ? 'disabled' : ''} style="width:100%;">
-                KK Check
-              </button>
-              <div class="flow-hint">Validate linearity, flag bad points, estimate Rs</div>
-            </div>
-          </div>
-
-          <div class="flow-arrow-col">›</div>
-
-          <!-- Step 2: Configure -->
-          <div class="flow-section flow-section-config">
-            <div class="flow-section-label">2 · Configure</div>
-            <div class="flow-section-body">
-              <div class="flow-config-row">
-                <label class="flow-config-item">
-                  <span class="flow-config-label">Timeout</span>
-                  <input id="fit-timeout" type="number" min="5" max="600" step="5"
-                         value="${state.fitTimeout ?? 60}" class="flow-input flow-input-sm">
-                  <span class="flow-unit">s</span>
-                </label>
-
-                <label class="flow-config-item">
-                  <span class="flow-config-label">Freq</span>
-                  <input id="freq-min" type="number" min="0" step="any"
-                         value="${state.fitFreqMin ?? ''}" placeholder="min" class="flow-input flow-input-md">
-                  <span class="flow-unit">–</span>
-                  <input id="freq-max" type="number" min="0" step="any"
-                         value="${state.fitFreqMax ?? ''}" placeholder="max" class="flow-input flow-input-md">
-                  <span class="flow-unit">Hz</span>
-                </label>
-
-                <label class="flow-config-item">
-                  <span class="flow-config-label">Weight</span>
-                  <select id="weighting-select" class="flow-select">
-                    <option value="none"         ${weighting === 'none'         ? 'selected' : ''}>None</option>
-                    <option value="modulus"       ${weighting === 'modulus'       ? 'selected' : ''}>Modulus (1/|Z|²)</option>
-                    <option value="proportional"  ${weighting === 'proportional'  ? 'selected' : ''}>Proportional (1/Z'², 1/Z''²)</option>
-                  </select>
-                </label>
-
-                <label class="flow-config-item">
-                  <span class="flow-config-label">Solver</span>
-                  <select id="solver-select" class="flow-select">
-                    <option value="lm"          ${solver === 'lm'          ? 'selected' : ''}>LM</option>
-                    <option value="diff_ev"     ${solver === 'diff_ev'     ? 'selected' : ''}>Diff. Evo.</option>
-                    <option value="basin_hop"   ${solver === 'basin_hop'   ? 'selected' : ''}>Basin Hopping</option>
-                    <option value="nelder_mead" ${solver === 'nelder_mead' ? 'selected' : ''}>Nelder-Mead</option>
-                  </select>
-                </label>
-
-                <label class="flow-config-item" style="flex-direction:row;align-items:center;gap:6px;cursor:pointer;"
-                       title="Remove high-frequency inductive points (Z'' > 0) before fitting">
-                  <input type="checkbox" id="omit-inductive-cb" ${omitInductive ? 'checked' : ''}
-                         style="accent-color:var(--accent);width:14px;height:14px;flex-shrink:0;">
-                  <span class="flow-config-label" style="white-space:nowrap;">Omit inductive</span>
-                </label>
-              </div>
-            </div>
-          </div>
-
-          <div class="flow-arrow-col">›</div>
-
-          <!-- Step 3: Run Fit -->
-          <div class="flow-section flow-section-run">
-            <div class="flow-section-label">3 · Fit</div>
-            <div class="flow-section-body">
-              <button class="btn btn-primary" id="run-btn" ${!ready ? 'disabled' : ''} style="width:100%;">
-                ${cached ? '↺ Re-run' : '▶ Run Fitting'}
-              </button>
-              ${failedCount > 0 ? `
-                <button class="btn btn-secondary" id="retry-btn" ${!ready ? 'disabled' : ''}
-                        style="width:100%;margin-top:6px;" title="Re-fit only the files that failed — successful results are kept">
-                  ↻ Retry failed (${failedCount})
-                </button>` : ''}
-              <button class="btn btn-danger" id="stop-btn" style="display:none;width:100%;">■ Stop</button>
-            </div>
-          </div>
-
-        </div><!-- /fit-flow-panel -->
-
-        <!-- Standalone Trends navigation, far right -->
+      <!-- Action toolbar: everything runs from here; settings live in the drawer -->
+      <div class="fit-toolbar">
+        <button class="btn btn-secondary" id="back-btn" title="Back to bounds editor">←</button>
+        <button class="btn btn-secondary" id="kk-run-btn" ${!ready ? 'disabled' : ''}
+                title="Validate linearity, flag bad points, estimate Rs">KK Check</button>
+        <button class="btn btn-primary" id="run-btn" ${!ready ? 'disabled' : ''}>
+          ${cached ? '↺ Re-run' : '▶ Run Fitting'}
+        </button>
+        ${failedCount > 0 ? `
+          <button class="btn btn-secondary" id="retry-btn" ${!ready ? 'disabled' : ''}
+                  title="Re-fit only the files that failed — successful results are kept">
+            ↻ Retry failed (${failedCount})
+          </button>` : ''}
+        <button class="btn btn-danger" id="stop-btn" style="display:none;">■ Stop</button>
+        <button class="btn btn-secondary${_settingsOpen ? ' active' : ''}" id="settings-toggle-btn"
+                aria-expanded="${_settingsOpen}" title="Fit settings">⚙ Settings</button>
+        <span class="fit-toolbar-summary" id="settings-summary" title="Current fit settings">${settingsSummary}</span>
         <button class="btn btn-secondary" id="next-btn"
                 ${!state.fitResults?.length ? 'disabled' : ''}
-                style="align-self:stretch;white-space:nowrap;">
+                style="margin-left:auto;white-space:nowrap;">
           View Trends →
         </button>
+      </div>
 
-      </div><!-- /fit-panel-row -->
+      <!-- Settings drawer (collapsed by default; inputs stay in the DOM either way) -->
+      <div class="fit-settings-drawer" id="fit-settings-drawer" ${_settingsOpen ? '' : 'style="display:none;"'}>
+        <label class="flow-config-item">
+          <span class="flow-config-label">Timeout</span>
+          <input id="fit-timeout" type="number" min="5" max="600" step="5"
+                 value="${state.fitTimeout ?? 60}" class="flow-input flow-input-sm">
+          <span class="flow-unit">s</span>
+        </label>
 
-      <!-- Progress bar (below the flow panel, full width) -->
+        <label class="flow-config-item">
+          <span class="flow-config-label">Freq</span>
+          <input id="freq-min" type="number" min="0" step="any"
+                 value="${state.fitFreqMin ?? ''}" placeholder="min" class="flow-input flow-input-md">
+          <span class="flow-unit">–</span>
+          <input id="freq-max" type="number" min="0" step="any"
+                 value="${state.fitFreqMax ?? ''}" placeholder="max" class="flow-input flow-input-md">
+          <span class="flow-unit">Hz</span>
+        </label>
+
+        <label class="flow-config-item">
+          <span class="flow-config-label">Weight</span>
+          <select id="weighting-select" class="flow-select">
+            <option value="none"         ${weighting === 'none'         ? 'selected' : ''}>None</option>
+            <option value="modulus"       ${weighting === 'modulus'       ? 'selected' : ''}>Modulus (1/|Z|²)</option>
+            <option value="proportional"  ${weighting === 'proportional'  ? 'selected' : ''}>Proportional (1/Z'², 1/Z''²)</option>
+          </select>
+        </label>
+
+        <label class="flow-config-item">
+          <span class="flow-config-label">Solver</span>
+          <select id="solver-select" class="flow-select">
+            <option value="lm"          ${solver === 'lm'          ? 'selected' : ''}>LM</option>
+            <option value="diff_ev"     ${solver === 'diff_ev'     ? 'selected' : ''}>Diff. Evo.</option>
+            <option value="basin_hop"   ${solver === 'basin_hop'   ? 'selected' : ''}>Basin Hopping</option>
+            <option value="nelder_mead" ${solver === 'nelder_mead' ? 'selected' : ''}>Nelder-Mead</option>
+          </select>
+        </label>
+
+        <label class="flow-config-item" style="flex-direction:row;align-items:center;gap:6px;cursor:pointer;"
+               title="Remove high-frequency inductive points (Z'' > 0) before fitting">
+          <input type="checkbox" id="omit-inductive-cb" ${omitInductive ? 'checked' : ''}
+                 style="accent-color:var(--accent);width:14px;height:14px;flex-shrink:0;">
+          <span class="flow-config-label" style="white-space:nowrap;">Omit inductive</span>
+        </label>
+
+        <label class="flow-config-item" style="flex-direction:row;align-items:center;gap:6px;cursor:pointer;"
+               title="Drop the exact points the KK check flagged (red ×) before fitting. Untick to fit all points.">
+          <input type="checkbox" id="exclude-kk-cb" ${excludeKKFlagged ? 'checked' : ''}
+                 style="accent-color:var(--accent);width:14px;height:14px;flex-shrink:0;">
+          <span class="flow-config-label" style="white-space:nowrap;">Exclude KK-flagged</span>
+        </label>
+      </div>
+
+      <!-- Progress bar (below the toolbar, full width) -->
       <div class="fitting-status" id="fit-status" style="display:none;">
         <div class="progress-label" id="progress-label">Starting…</div>
         <div class="progress-bar-wrap"><div class="progress-bar-fill" id="progress-bar"></div></div>
@@ -284,37 +302,46 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         </label>
       </div>
 
-      <div class="fit-tile-root" id="fit-tile-root">
-        ${buildTileGrid(files)}
-      </div>
+      <!-- Master-detail: tile grid left, persistent detail panel right -->
+      <div class="fit-main-split">
+        <div class="fit-tile-root" id="fit-tile-root">
+          ${buildTileGrid(files)}
+        </div>
 
-      <!-- Shared modal for both KK and fit results -->
-      <div class="fit-modal-overlay" id="fit-modal" style="display:none;" role="dialog" aria-modal="true">
-        <div class="fit-modal-box">
-          <div class="fit-modal-header">
-            <span class="fit-modal-title" id="fit-modal-title"></span>
-            <span class="residual-badge" id="fit-modal-badge"></span>
-            <button class="fit-modal-close" id="fit-modal-close" aria-label="Close">✕</button>
+        <div class="fit-detail" id="fit-detail" style="display:none;">
+          <div class="fit-detail-header">
+            <button class="fit-detail-nav" id="detail-prev" title="Previous file (←)">‹</button>
+            <button class="fit-detail-nav" id="detail-next" title="Next file (→)">›</button>
+            <span class="fit-modal-title" id="fit-detail-title"></span>
+            <span class="residual-badge" id="fit-detail-badge"></span>
+            <button class="fit-modal-close" id="fit-detail-close" aria-label="Close" title="Close (Esc)">✕</button>
           </div>
-          <div class="fit-modal-meta" id="fit-modal-meta"></div>
-          <div class="fit-modal-tabs" id="fit-modal-tabs"></div>
-          <div class="fit-modal-plot" id="fit-modal-plot"></div>
-          <div class="params-summary fit-modal-params" id="fit-modal-params"></div>
+          <div class="fit-modal-meta" id="fit-detail-meta"></div>
+          <div class="fit-modal-tabs" id="fit-detail-tabs"></div>
+          <div class="fit-detail-plot" id="fit-detail-plot"></div>
+          <div class="params-summary fit-modal-params" id="fit-detail-params"></div>
         </div>
       </div>
     `;
 
-    container.querySelector('#back-btn').addEventListener('click', () => navigate(5));
-    container.querySelector('#next-btn').addEventListener('click', () => navigate(7));
+    container.querySelector('#back-btn').addEventListener('click', () => navigate('bounds'));
+    container.querySelector('#next-btn').addEventListener('click', () => navigate(5));
     container.querySelector('#run-btn').addEventListener('click', () => runFitting());
     container.querySelector('#retry-btn')?.addEventListener('click', () => runFitting({ retryFailedOnly: true }));
     container.querySelector('#stop-btn').addEventListener('click', stopFitting);
     container.querySelector('#kk-run-btn').addEventListener('click', runKK);
     container.querySelector('#clear-cache-link')?.addEventListener('click', e => { e.preventDefault(); runFitting(); });
-    container.querySelector('#fit-modal-close').addEventListener('click', closeModal);
-    container.querySelector('#fit-modal').addEventListener('click', e => {
-      if (e.target === e.currentTarget) closeModal();
+    container.querySelector('#settings-toggle-btn').addEventListener('click', () => {
+      _settingsOpen = !_settingsOpen;
+      const drawer = container.querySelector('#fit-settings-drawer');
+      const btn    = container.querySelector('#settings-toggle-btn');
+      drawer.style.display = _settingsOpen ? '' : 'none';
+      btn.classList.toggle('active', _settingsOpen);
+      btn.setAttribute('aria-expanded', String(_settingsOpen));
     });
+    container.querySelector('#fit-detail-close').addEventListener('click', closeDetail);
+    container.querySelector('#detail-prev').addEventListener('click', () => navSelect(-1));
+    container.querySelector('#detail-next').addEventListener('click', () => navSelect(1));
     container.querySelector('#weighting-select').addEventListener('change', e => {
       setState({ fitWeighting: e.target.value });
     });
@@ -323,6 +350,9 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     });
     container.querySelector('#omit-inductive-cb').addEventListener('change', e => {
       setState({ omitInductive: e.target.checked });
+    });
+    container.querySelector('#exclude-kk-cb').addEventListener('change', e => {
+      setState({ excludeKKFlagged: e.target.checked });
     });
     container.querySelector('#bin-by-select')?.addEventListener('change', e => {
       binByField = e.target.value;
@@ -334,6 +364,13 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     });
 
     wireTileClicks();
+
+    // Restore the detail panel after a full re-render (e.g. post-run)
+    if (_selectedPath && (resultMap.has(_selectedPath) || kkMap.has(_selectedPath))) {
+      selectFile(_selectedPath);
+    } else {
+      _selectedPath = null;
+    }
   }
 
   // ── Tile building ──────────────────────────────────────────────────────────
@@ -387,19 +424,16 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     }).join('');
   }
 
+  // A tile always shows the fit result as primary state (with a small KK badge
+  // when KK data exists); KK-only styling appears only before any fit has run.
   function buildTile(filename, path) {
     const safeId    = pathToSafeId(path);
     const fitResult = resultMap.get(path);
     const kkResult  = kkMap.get(path);
 
-    // KK view takes priority when KK was the most recently run operation
-    if (_activeView === 'kk' && kkResult) {
-      return _kkTileHTML(filename, path, safeId, kkResult);
-    }
     if (fitResult) {
-      return _fitTileHTML(filename, path, safeId, fitResult);
+      return _fitTileHTML(filename, path, safeId, fitResult, kkResult);
     }
-    // KK as fallback when no fit result yet
     if (kkResult) {
       return _kkTileHTML(filename, path, safeId, kkResult);
     }
@@ -409,13 +443,13 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     </div>`;
   }
 
-  function _fitTileHTML(filename, path, safeId, result) {
+  function _fitTileHTML(filename, path, safeId, result, kk) {
     const good = result.success && result.residual != null && result.residual < GOOD_THRESHOLD;
     const cls  = result.success ? (good ? 'good' : 'poor') : 'failed';
     const pct  = result.residual != null ? `${(result.residual * 100).toFixed(1)}%` : '—';
     return `<div class="fit-tile ${cls}" data-path="${path}" id="tile-${safeId}">
       <div class="fit-tile-name">${filename}</div>
-      <div class="fit-tile-pct">${result.success ? pct : 'FAILED'}</div>
+      <div class="fit-tile-pct">${result.success ? pct : 'FAILED'}${kkBadge(kk)}</div>
     </div>`;
   }
 
@@ -436,135 +470,215 @@ export function FittingRunnerView(container, { navigate, showToast }) {
 
   function wireTileClicks() {
     container.querySelectorAll('.fit-tile:not(.pending)').forEach(el => {
-      el.addEventListener('click', () => {
-        const path = el.dataset.path;
-        // Route based on what the tile is visually showing, not just map presence
-        const isKKTile = el.classList.contains('kk-ok') ||
-                         el.classList.contains('kk-warn') ||
-                         el.classList.contains('kk-fail');
-        if (isKKTile) {
-          const kkResult = kkMap.get(path);
-          if (kkResult) openKKModal(kkResult);
-        } else {
-          const fitResult = resultMap.get(path);
-          if (fitResult) openFitModal(fitResult);
-        }
-      });
+      el.addEventListener('click', () => selectFile(el.dataset.path));
+      if (el.dataset.path === _selectedPath) el.classList.add('selected');
     });
   }
 
-  // Live update helpers called during streaming
-
-  function updateFitTile(fitResult, path) {
+  // Live update helper called during streaming — rebuilds one tile from the maps.
+  function updateTile(path) {
     const safeId = pathToSafeId(path);
     const el = container.querySelector(`#tile-${safeId}`);
     if (!el) return;
-    // Replace entire inner HTML so any KK sub-line is also removed
-    el.outerHTML = _fitTileHTML(
+    el.outerHTML = buildTile(
       el.querySelector('.fit-tile-name')?.textContent ?? '',
-      path, safeId, fitResult,
+      path,
     );
     // Re-query since outerHTML replaced the element
     const fresh = container.querySelector(`#tile-${safeId}`);
-    if (fresh) fresh.addEventListener('click', () => openFitModal(fitResult));
+    if (fresh && !fresh.classList.contains('pending')) {
+      fresh.addEventListener('click', () => selectFile(path));
+    }
+    // Keep the open detail panel in sync with streamed results
+    if (path === _selectedPath) {
+      fresh?.classList.add('selected');
+      renderDetail(path);
+    }
   }
 
-  function updateKKTile(kkResult, path) {
-    // KK always overrides — this is the point: re-running KK after fitting shows KK state
-    const safeId = pathToSafeId(path);
-    const el = container.querySelector(`#tile-${safeId}`);
-    if (!el) return;
-    el.outerHTML = _kkTileHTML(
-      el.querySelector('.fit-tile-name')?.textContent ?? '',
-      path, safeId, kkResult,
-    );
-    const fresh = container.querySelector(`#tile-${safeId}`);
-    if (fresh) fresh.addEventListener('click', () => openKKModal(kkResult));
+  // ── Selection / detail-panel navigation ────────────────────────────────────
+
+  function selectFile(path) {
+    _selectedPath = path;
+    container.querySelectorAll('.fit-tile.selected').forEach(el => el.classList.remove('selected'));
+    const tile = container.querySelector(`#tile-${pathToSafeId(path)}`);
+    if (tile) {
+      tile.classList.add('selected');
+      tile.scrollIntoView({ block: 'nearest' });
+    }
+    renderDetail(path);
   }
 
-  // ── KK modal ───────────────────────────────────────────────────────────────
+  function closeDetail() {
+    _selectedPath = null;
+    container.querySelectorAll('.fit-tile.selected').forEach(el => el.classList.remove('selected'));
+    const panel = container.querySelector('#fit-detail');
+    if (panel) {
+      panel.style.display = 'none';
+      container.querySelector('#fit-detail-plot').innerHTML = '';
+    }
+  }
 
-  function openKKModal(kk) {
-    const modal    = container.querySelector('#fit-modal');
-    const titleEl  = container.querySelector('#fit-modal-title');
-    const badgeEl  = container.querySelector('#fit-modal-badge');
-    const metaEl   = container.querySelector('#fit-modal-meta');
-    const plotEl   = container.querySelector('#fit-modal-plot');
-    const paramsEl = container.querySelector('#fit-modal-params');
-    const tabsEl   = container.querySelector('#fit-modal-tabs');
+  // Files with data, in the order the grid displays them (respects binning/sorting)
+  function selectablePaths() {
+    return [...container.querySelectorAll('.fit-tile:not(.pending)')].map(el => el.dataset.path);
+  }
 
-    titleEl.textContent = kk.filename;
+  function navSelect(dir) {
+    const paths = selectablePaths();
+    if (!paths.length) return;
+    const idx = paths.indexOf(_selectedPath);
+    const next = idx === -1
+      ? (dir > 0 ? 0 : paths.length - 1)
+      : Math.min(paths.length - 1, Math.max(0, idx + dir));
+    if (paths[next] !== _selectedPath) selectFile(paths[next]);
+  }
 
-    // Badge
-    const { cls: kkCls, label: kkLabel } = kkTileState(kk);
-    const badgeClass = kkCls === 'kk-ok' ? 'good' : kkCls === 'kk-warn' ? 'poor' : 'failed';
-    badgeEl.className = `residual-badge ${badgeClass}`;
-    badgeEl.textContent = kk.success ? kkLabel : 'KK ✗';
+  // ── Detail panel — fit and KK views of the selected file ───────────────────
 
-    // Meta line
+  function renderDetail(path) {
+    const fit = resultMap.get(path);
+    const kk  = kkMap.get(path);
+    if (!fit && !kk) { closeDetail(); return; }
+
+    const panel    = container.querySelector('#fit-detail');
+    const titleEl  = container.querySelector('#fit-detail-title');
+    const badgeEl  = container.querySelector('#fit-detail-badge');
+    const metaEl   = container.querySelector('#fit-detail-meta');
+    const plotEl   = container.querySelector('#fit-detail-plot');
+    const paramsEl = container.querySelector('#fit-detail-params');
+    const tabsEl   = container.querySelector('#fit-detail-tabs');
+    if (!panel) return;
+
+    // Prev/next reflect position in the displayed order
+    const paths = selectablePaths();
+    const idx   = paths.indexOf(path);
+    container.querySelector('#detail-prev').disabled = idx <= 0;
+    container.querySelector('#detail-next').disabled = idx === -1 || idx >= paths.length - 1;
+
+    titleEl.textContent = (fit ?? kk).filename;
+
+    // Badge: fit residual when available, KK verdict otherwise
+    if (fit) {
+      const good = fit.success && fit.residual != null && fit.residual < GOOD_THRESHOLD;
+      badgeEl.className = `residual-badge ${fit.success ? (good ? 'good' : 'poor') : 'failed'}`;
+      badgeEl.textContent = fit.success ? `${(fit.residual * 100).toFixed(2)}%` : 'FAILED';
+    } else {
+      const { cls: kkCls, label: kkLabel } = kkTileState(kk);
+      badgeEl.className = `residual-badge ${kkCls === 'kk-ok' ? 'good' : kkCls === 'kk-warn' ? 'poor' : 'failed'}`;
+      badgeEl.textContent = kk.success ? kkLabel : 'KK ✗';
+    }
+
+    // Meta line: fit info first, KK summary appended
     const metaParts = [];
-    if (kk.M  != null) metaParts.push(`M = ${kk.M} RC elements`);
-    if (kk.mu != null) metaParts.push(`μ = ${kk.mu.toFixed(3)}`);
-    if (kk.rs_estimate != null) metaParts.push(`Rs ≈ ${(kk.rs_estimate * 1000).toFixed(2)} mΩ`);
-    if (kk.lf_intercept != null && kk.rs_estimate != null)
-      metaParts.push(`R₁ ≈ ${((kk.lf_intercept - kk.rs_estimate) * 1000).toFixed(2)} mΩ`);
-    if (kk.error)      metaParts.push(kk.error);
+    if (fit) {
+      const charStr = Object.entries(fit.characterization || {})
+        .map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toPrecision(4) : v}`).join(' · ');
+      if (charStr)          metaParts.push(charStr);
+      if (fit.circuit_used) metaParts.push(`Circuit: ${fit.circuit_used}`);
+      if (fit.error)        metaParts.push(fit.error);
+    }
+    if (kk) {
+      if (kk.M != null && kk.mu != null) metaParts.push(`KK: M=${kk.M}, μ=${kk.mu.toFixed(3)}`);
+      if (kk.rs_estimate != null)        metaParts.push(`Rs ≈ ${(kk.rs_estimate * 1000).toFixed(2)} mΩ`);
+      if (kk.lf_intercept != null && kk.rs_estimate != null)
+        metaParts.push(`R₁ ≈ ${((kk.lf_intercept - kk.rs_estimate) * 1000).toFixed(2)} mΩ`);
+      if (!kk.success && kk.error)       metaParts.push(kk.error);
+    }
     metaEl.textContent = metaParts.join(' · ');
 
-    // Tabs: Nyquist (KK) + Residuals
+    // Bottom strip: fitted parameters, or KK hints when no fit exists yet
+    paramsEl.innerHTML = '';
+    if (fit) {
+      paramsEl.innerHTML = Object.entries(fit.parameters || {})
+        .map(([k, v]) => {
+          const { scale, unit } = paramUnitInfo(k);
+          const disp = typeof v === 'number' ? fmtNum(v * scale) : v;
+          const warn = typeof v === 'number' ? checkPhysical(k, v) : null;
+          const warnHtml = warn ? ` <span class="param-warn" title="${warn}">⚠</span>` : '';
+          return `<span>${k}${warnHtml}</span>${disp}${unit ? ' ' + unit : ''}`;
+        }).join(' &nbsp; ');
+    } else if (kk) {
+      const hints = [];
+      if (kk.freq_min_suggest != null)
+        hints.push(`Freq: ${kk.freq_min_suggest.toPrecision(3)} – ${kk.freq_max_suggest.toPrecision(3)} Hz`);
+      if (kk.rs_estimate != null)
+        hints.push(`Rs ≈ ${(kk.rs_estimate * 1000).toFixed(2)} mΩ seeds R0`);
+      if (kk.lf_intercept != null && kk.rs_estimate != null)
+        hints.push(`R₁ ≈ ${((kk.lf_intercept - kk.rs_estimate) * 1000).toFixed(2)} mΩ seeds R1`);
+      if (hints.length) {
+        paramsEl.innerHTML = `
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <span style="font-size:12px;color:var(--text-muted);">${hints.join(' · ')}</span>
+            ${kk.freq_min_suggest != null ? `<button class="btn btn-secondary" id="modal-kk-apply" style="font-size:12px;padding:4px 12px;">Apply freq range globally</button>` : ''}
+          </div>`;
+        container.querySelector('#modal-kk-apply')?.addEventListener('click', () => {
+          const minEl = container.querySelector('#freq-min');
+          const maxEl = container.querySelector('#freq-max');
+          if (minEl) minEl.value = kk.freq_min_suggest;
+          if (maxEl) maxEl.value = kk.freq_max_suggest;
+          showToast('Global freq range updated.', 'success');
+        });
+      }
+    }
+
+    // Tabs: fit tabs first (when a fit exists), KK tabs appended (when KK ran)
+    const tabDefs = [];
+    if (fit) {
+      tabDefs.push(
+        { id: 'nyquist',    label: 'Nyquist' },
+        { id: 'bode',       label: 'Bode' },
+        { id: 'residuals',  label: 'Residuals' },
+        { id: 'parameters', label: 'Parameters' },
+      );
+      if (fit.variants_tried?.length > 1)
+        tabDefs.push({ id: 'variants', label: `Variants (${fit.variants_tried.length})` });
+      tabDefs.push({ id: 'diagnostics', label: 'Diagnostics' });
+    }
+    if (kk) {
+      tabDefs.push(
+        { id: 'kk-nyquist',   label: 'Nyquist (KK)' },
+        { id: 'kk-residuals', label: 'KK Residuals' },
+      );
+    }
+
+    // Keep the same tab active across file navigation so one plot type can be
+    // compared file-to-file with ←/→; fall back to this file's first tab.
+    const activeId = tabDefs.some(t => t.id === _activeTab) ? _activeTab : tabDefs[0].id;
+
     tabsEl.innerHTML = '';
-    [
-      { id: 'kk-nyquist',   label: 'Nyquist (KK)' },
-      { id: 'kk-residuals', label: 'KK Residuals' },
-    ].forEach(({ id, label }, idx) => {
+    tabDefs.forEach(({ id, label }) => {
       const btn = document.createElement('button');
-      btn.className = `tab-btn${idx === 0 ? ' active' : ''}`;
+      btn.className = `tab-btn${id === activeId ? ' active' : ''}`;
       btn.dataset.tab = id;
       btn.textContent = label;
       tabsEl.appendChild(btn);
     });
 
+    const showTab = id => {
+      if      (id === 'nyquist')      plotNyquist(fit, plotEl);
+      else if (id === 'bode')         plotBode(fit, plotEl);
+      else if (id === 'residuals')    plotResiduals(fit, plotEl);
+      else if (id === 'parameters')   plotParameters(fit, plotEl);
+      else if (id === 'variants')     plotVariants(fit, plotEl);
+      else if (id === 'diagnostics')  plotDiagnostics(fit, plotEl);
+      else if (id === 'kk-nyquist')   plotKKNyquist(kk, plotEl);
+      else if (id === 'kk-residuals') plotKKResiduals(kk, plotEl);
+    };
+
     tabsEl.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         tabsEl.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
+        _activeTab = btn.dataset.tab;
         plotEl.innerHTML = '';
-        requestAnimationFrame(() => {
-          if (btn.dataset.tab === 'kk-nyquist') plotKKNyquist(kk, plotEl);
-          else                                   plotKKResiduals(kk, plotEl);
-        });
+        requestAnimationFrame(() => showTab(btn.dataset.tab));
       });
     });
 
-    // Bottom action: apply suggested range
-    paramsEl.innerHTML = '';
-    const hints = [];
-    if (kk.freq_min_suggest != null)
-      hints.push(`Freq: ${kk.freq_min_suggest.toPrecision(3)} – ${kk.freq_max_suggest.toPrecision(3)} Hz`);
-    if (kk.rs_estimate != null)
-      hints.push(`Rs ≈ ${(kk.rs_estimate * 1000).toFixed(2)} mΩ seeds R0`);
-    if (kk.lf_intercept != null && kk.rs_estimate != null)
-      hints.push(`R₁ ≈ ${((kk.lf_intercept - kk.rs_estimate) * 1000).toFixed(2)} mΩ seeds R1`);
-
-    if (hints.length) {
-      paramsEl.innerHTML = `
-        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-          <span style="font-size:12px;color:var(--text-muted);">${hints.join(' · ')}</span>
-          ${kk.freq_min_suggest != null ? `<button class="btn btn-secondary" id="modal-kk-apply" style="font-size:12px;padding:4px 12px;">Apply freq range globally</button>` : ''}
-        </div>`;
-      container.querySelector('#modal-kk-apply')?.addEventListener('click', () => {
-        const minEl = container.querySelector('#freq-min');
-        const maxEl = container.querySelector('#freq-max');
-        if (minEl) minEl.value = kk.freq_min_suggest;
-        if (maxEl) maxEl.value = kk.freq_max_suggest;
-        closeModal();
-        showToast('Global freq range updated — per-file ranges from KK are still used automatically.', 'success');
-      });
-    }
-
     plotEl.innerHTML = '';
-    modal.style.display = 'flex';
-    requestAnimationFrame(() => plotKKNyquist(kk, plotEl));
+    panel.style.display = '';
+    requestAnimationFrame(() => showTab(activeId));
   }
 
   function plotKKNyquist(kk, el) {
@@ -719,87 +833,6 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     }, { displayModeBar: false, responsive: true });
   }
 
-  // ── Fit modal ──────────────────────────────────────────────────────────────
-
-  function openFitModal(result) {
-    const modal    = container.querySelector('#fit-modal');
-    const titleEl  = container.querySelector('#fit-modal-title');
-    const badgeEl  = container.querySelector('#fit-modal-badge');
-    const metaEl   = container.querySelector('#fit-modal-meta');
-    const plotEl   = container.querySelector('#fit-modal-plot');
-    const paramsEl = container.querySelector('#fit-modal-params');
-    const tabsEl   = container.querySelector('#fit-modal-tabs');
-
-    titleEl.textContent = result.filename;
-
-    const good = result.success && result.residual != null && result.residual < GOOD_THRESHOLD;
-    badgeEl.className = `residual-badge ${result.success ? (good ? 'good' : 'poor') : 'failed'}`;
-    badgeEl.textContent = result.success
-      ? `${(result.residual * 100).toFixed(2)}%`
-      : 'FAILED';
-
-    const charStr   = Object.entries(result.characterization || {})
-      .map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toPrecision(4) : v}`).join(' · ');
-    const circuitStr = result.circuit_used ? `Circuit: ${result.circuit_used}` : '';
-    metaEl.textContent = [charStr, circuitStr].filter(Boolean).join(' · ');
-    if (result.error) metaEl.textContent += (metaEl.textContent ? ' · ' : '') + result.error;
-
-    paramsEl.innerHTML = Object.entries(result.parameters || {})
-      .map(([k, v]) => {
-        const { scale, unit } = paramUnitInfo(k);
-        const disp = typeof v === 'number' ? fmtNum(v * scale) : v;
-        const warn = typeof v === 'number' ? checkPhysical(k, v) : null;
-        const warnHtml = warn ? ` <span class="param-warn" title="${warn}">⚠</span>` : '';
-        return `<span>${k}${warnHtml}</span>${disp}${unit ? ' ' + unit : ''}`;
-      }).join(' &nbsp; ');
-
-    // Build tabs
-    tabsEl.innerHTML = '';
-    const tabDefs = [
-      { id: 'nyquist',     label: 'Nyquist' },
-      { id: 'bode',        label: 'Bode' },
-      { id: 'residuals',   label: 'Residuals' },
-      { id: 'parameters',  label: 'Parameters' },
-    ];
-    if (result.variants_tried?.length > 1)
-      tabDefs.push({ id: 'variants', label: `Variants (${result.variants_tried.length})` });
-    tabDefs.push({ id: 'diagnostics', label: 'Diagnostics' });
-
-    tabDefs.forEach(({ id, label }, idx) => {
-      const btn = document.createElement('button');
-      btn.className = `tab-btn${idx === 0 ? ' active' : ''}`;
-      btn.dataset.tab = id;
-      btn.textContent = label;
-      tabsEl.appendChild(btn);
-    });
-
-    tabsEl.querySelectorAll('.tab-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        tabsEl.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        plotEl.innerHTML = '';
-        requestAnimationFrame(() => {
-          const t = btn.dataset.tab;
-          if      (t === 'nyquist')     plotNyquist(result, plotEl);
-          else if (t === 'bode')        plotBode(result, plotEl);
-          else if (t === 'parameters')  plotParameters(result, plotEl);
-          else if (t === 'variants')    plotVariants(result, plotEl);
-          else if (t === 'diagnostics') plotDiagnostics(result, plotEl);
-          else                          plotResiduals(result, plotEl);
-        });
-      });
-    });
-
-    plotEl.innerHTML = '';
-    modal.style.display = 'flex';
-    requestAnimationFrame(() => plotNyquist(result, plotEl));
-  }
-
-  function closeModal() {
-    container.querySelector('#fit-modal').style.display = 'none';
-    container.querySelector('#fit-modal-plot').innerHTML = '';
-  }
-
   // ── KK run ─────────────────────────────────────────────────────────────────
 
   async function runKK() {
@@ -810,10 +843,8 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     kkBtn.disabled = true;
     kkBtn.textContent = 'KK…';
 
-    _activeView = 'kk';
     kkMap.clear();
-    rebuildGrid();   // tiles go to pending (or fit state if _activeView were 'fit')
-    wireTileClicks();
+    rebuildGrid();   // KK badges drop off tiles; they stream back in as results arrive
 
     const freqMinVal = container.querySelector('#freq-min').value.trim();
     const freqMaxVal = container.querySelector('#freq-max').value.trim();
@@ -834,7 +865,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
           const path = filePaths[kkResults.length];
           kkResults.push(r);
           kkMap.set(path, r);
-          updateKKTile(r, path);
+          updateTile(path);
           await new Promise(resolve => requestAnimationFrame(resolve));
         } else if (event.event === 'done') {
           const nFlagged = kkResults.filter(r => r.success && r.flagged_indices?.length > 0).length;
@@ -860,10 +891,13 @@ export function FittingRunnerView(container, { navigate, showToast }) {
           rsEst:    r.rs_estimate      ?? null,
           M:        r.M                ?? null,
           mu:       r.mu               ?? null,
+          // Frequencies of flagged points — the fit excludes these exact points
+          // (index positions can shift with freq filtering; frequency values don't)
+          flaggedFreqs: (r.flagged_indices || []).map(i => r.frequencies?.[i]).filter(f => f != null),
         };
       }
     }
-    setState({ kkData });
+    setState({ kkData, kkResults });
 
     kkBtn.disabled = false;
     kkBtn.textContent = 'KK Check';
@@ -876,7 +910,13 @@ export function FittingRunnerView(container, { navigate, showToast }) {
                         // their value and bail if it has changed (navigated away + back)
 
   function stopFitting() { _abortCtrl?.abort(); }
-  function onKeyDown(e) { if (e.key === 'Escape') closeModal(); }
+  function onKeyDown(e) {
+    // Don't hijack keys while the user is typing in a form control
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target?.tagName)) return;
+    if      (e.key === 'Escape')     closeDetail();
+    else if (e.key === 'ArrowLeft')  { if (_selectedPath) { e.preventDefault(); navSelect(-1); } }
+    else if (e.key === 'ArrowRight') { if (_selectedPath) { e.preventDefault(); navSelect(1); } }
+  }
 
   let _running = false;
 
@@ -929,25 +969,26 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     const freqMax         = freqMaxVal !== '' ? parseFloat(freqMaxVal) : null;
     const weighting      = container.querySelector('#weighting-select').value;
     const solver         = container.querySelector('#solver-select').value;
-    const omitInductive  = container.querySelector('#omit-inductive-cb').checked;
+    const omitInductive    = container.querySelector('#omit-inductive-cb').checked;
+    const excludeKKFlagged = container.querySelector('#exclude-kk-cb').checked;
     const runCacheKey = configKey({ ...state, fitTimeout: timeout, fitFreqMin: freqMin,
                                    fitFreqMax: freqMax, fitWeighting: weighting, fitSolver: solver,
-                                   omitInductive });
+                                   omitInductive, excludeKKFlagged });
 
     try {
       setState({ fitTimeout: timeout, fitFreqMin: freqMin, fitFreqMax: freqMax,
-                 fitWeighting: weighting, fitSolver: solver, omitInductive });
+                 fitWeighting: weighting, fitSolver: solver, omitInductive, excludeKKFlagged });
 
-      // Attach per-file KK-derived freq range and Rs estimate to each FileInfo.
-      // Per-file values take priority in the backend; global inputs are the fallback.
+      // Attach KK-derived data to each FileInfo: the Rs seed always, and the
+      // exact flagged points to exclude when "Exclude KK-flagged" is on.
+      // (The global freq range is passed request-level; no per-file trim.)
       const kkData = getState().kkData ?? {};
       const filesWithKK = targetFiles.map(f => {
         const kk = kkData[f.path];
         return {
           ...f,
-          freq_min:    kk?.freqMin  ?? freqMin,
-          freq_max:    kk?.freqMax  ?? freqMax,
-          rs_estimate: kk?.rsEst    ?? null,
+          rs_estimate:   kk?.rsEst ?? null,
+          exclude_freqs: excludeKKFlagged && kk?.flaggedFreqs?.length ? kk.flaggedFreqs : null,
         };
       });
 
@@ -975,7 +1016,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
           completedCount++;
           if (result.success) okCount++;
           resultMap.set(path, result);
-          updateFitTile(result, path);
+          updateTile(path);
           await new Promise(r => requestAnimationFrame(r));
         } else if (event.event === 'done') {
           gotDone = true;
@@ -991,18 +1032,34 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         showToast(`Fitting error: ${err.message}`, 'error');
       }
     } finally {
-      _activeView = 'fit';
       _running = false;
       // Merge this run's results with any kept from previous runs (retry mode),
       // in canonical state.files order — everything keyed by path.
       const merged = (getState().files || [])
         .map(f => resultMap.get(f.path))
         .filter(Boolean);
+      // Snapshot the config used for every file this run actually fitted —
+      // each entry is retained until a later run overwrites it.
+      const fileConfigs = { ...(getState().fileConfigs ?? {}) };
+      const savedAt = new Date().toISOString();
+      for (const f of targetFiles) {
+        const r = resultMap.get(f.path);
+        if (!r) continue;   // run stopped before reaching this file — keep its old config
+        fileConfigs[f.path] = {
+          circuitConfig: perFileCircuitConfig(r, state.circuitConfig),
+          fitTimeout: timeout,
+          freqMin, freqMax,
+          weighting, solver, omitInductive, excludeKKFlagged,
+          optimize: state.optimizeConfig?.enabled ?? false,
+          savedAt,
+        };
+      }
       // Always persist results — even if the user navigated away, the data is valuable.
       setState({
         fitResults:  merged,
+        fileConfigs,
         fitCacheKey: (!stopped && gotDone) ? runCacheKey : null,
-        maxStep:     Math.max(state.maxStep, 7),
+        maxStep:     Math.max(state.maxStep, 5),
       });
       // Only touch the DOM if we are still in the same view session.
       // If the user left and came back, onEnter already rendered a fresh view;
