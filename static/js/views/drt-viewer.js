@@ -123,7 +123,7 @@ export function DRTView(container, { navigate, showToast }) {
       <div class="step-actions" style="margin-bottom:16px;">
         <button class="btn btn-secondary" id="back-btn">← Back</button>
         <div class="spacer"></div>
-        <button class="btn btn-secondary" id="next-btn">Build Circuit →</button>
+        <button class="btn btn-secondary" id="next-btn">Fit →</button>
       </div>
 
       ${!ready ? `
