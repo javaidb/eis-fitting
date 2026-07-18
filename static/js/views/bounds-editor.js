@@ -36,7 +36,7 @@ function checkPhysical(name, value) {
   return null;
 }
 
-function guessDefault(paramName) {
+export function guessDefault(paramName) {
   // paramName examples: R0, C1, CPE0_0, CPE0_1, Wo1_0, Wo1_1, W2, L0, La0_0, G1_1
   if (/^CPE\d+_0/i.test(paramName)) return DEFAULTS_CPE[0];
   if (/^CPE\d+_1/i.test(paramName)) return DEFAULTS_CPE[1];
@@ -132,7 +132,7 @@ export function BoundsEditorView(container, { navigate, showToast }) {
       <div class="step-actions">
         <button class="btn btn-secondary" id="back-btn">← Back</button>
         <div class="spacer"></div>
-        <button class="btn btn-primary" id="next-btn">Next: Fit →</button>
+        <button class="btn btn-primary" id="next-btn">Next: Run →</button>
       </div>
     `;
 
@@ -165,7 +165,7 @@ export function BoundsEditorView(container, { navigate, showToast }) {
       });
     });
 
-    container.querySelector('#back-btn').addEventListener('click', () => navigate(4));
+    container.querySelector('#back-btn').addEventListener('click', () => navigate('circuit'));
     container.querySelector('#next-btn').addEventListener('click', () => {
       const initial_guess = [], lower_bounds = [], upper_bounds = [];
       let valid = true;
@@ -207,8 +207,8 @@ export function BoundsEditorView(container, { navigate, showToast }) {
         upper_bounds,
       };
 
-      setState({ circuitConfig, maxStep: Math.max(getState().maxStep, 6) });
-      navigate(6);
+      setState({ circuitConfig });
+      navigate('run');
     });
   }
 
