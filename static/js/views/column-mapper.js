@@ -242,7 +242,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
       <div class="step-actions">
         <button class="btn btn-secondary" id="back-btn">← Back</button>
         <div class="spacer"></div>
-        <button class="btn btn-primary" id="next-btn">Next: Build Circuit →</button>
+        <button class="btn btn-primary" id="next-btn">Next: DRT →</button>
       </div>
 
       </div><!-- /mapper-main -->
