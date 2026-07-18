@@ -2,9 +2,7 @@ import { getState, setState, subscribe } from './state.js';
 import { FileLoaderView }    from './views/file-loader.js';
 import { ColumnMapperView }  from './views/column-mapper.js';
 import { DRTView }           from './views/drt-viewer.js';
-import { CircuitBuilderView } from './views/circuit-builder.js';
-import { BoundsEditorView }  from './views/bounds-editor.js';
-import { FittingRunnerView } from './views/fitting-runner.js';
+import { FitView }           from './views/fit-view.js';
 import { TrendsView }        from './views/trends.js';
 
 // ── Toast helper (exported so views can use it) ─────────────────
@@ -22,10 +20,8 @@ const VIEWS = [
   { step: 1, el: document.getElementById('view-1'), factory: FileLoaderView },
   { step: 2, el: document.getElementById('view-2'), factory: ColumnMapperView },
   { step: 3, el: document.getElementById('view-3'), factory: DRTView },
-  { step: 4, el: document.getElementById('view-4'), factory: CircuitBuilderView },
-  { step: 5, el: document.getElementById('view-5'), factory: BoundsEditorView },
-  { step: 6, el: document.getElementById('view-6'), factory: FittingRunnerView },
-  { step: 7, el: document.getElementById('view-7'), factory: TrendsView },
+  { step: 4, el: document.getElementById('view-4'), factory: FitView },
+  { step: 5, el: document.getElementById('view-5'), factory: TrendsView },
 ];
 
 const instances = {};
@@ -34,22 +30,26 @@ VIEWS.forEach(({ step, el, factory }) => {
 });
 
 // ── Navigation ───────────────────────────────────────────────────
-const STEP_LABELS = { 1: 'Load Files', 2: 'Map Columns', 3: 'DRT', 4: 'Build Circuit', 5: 'Set Bounds', 6: 'Fit', 7: 'Trends' };
+const STEP_LABELS = { 1: 'Load Files', 2: 'Map Columns', 3: 'DRT', 4: 'Fit', 5: 'Trends' };
 const globalNextBtn = document.getElementById('global-next-btn');
 
 function updateGlobalNext(step) {
-  if (step >= 7) { globalNextBtn.style.display = 'none'; return; }
+  if (step >= 5) { globalNextBtn.style.display = 'none'; return; }
   globalNextBtn.style.display = '';
-  globalNextBtn.textContent = `Next: ${STEP_LABELS[step + 1]} →`;
+  // The Fit step advances through its own internal sections, so a fixed
+  // "Next: <label>" would be misleading there.
+  globalNextBtn.textContent = step === 4 ? 'Next →' : `Next: ${STEP_LABELS[step + 1]} →`;
 }
 
 // Proxy to the active view's own Next button so per-step validation and
 // state commits (e.g. Map Columns building the columnMap) still run.
 globalNextBtn.addEventListener('click', () => {
   const step = getState().step;
-  if (step >= 7) return;
+  if (step >= 5) return;
   const view = VIEWS.find(v => v.step === step);
-  const viewNext = view?.el.querySelector('#next-btn');
+  // Composite views (Fit) expose the Next button of their active section.
+  const inst = instances[step];
+  const viewNext = inst?.getNextBtn ? inst.getNextBtn() : view?.el.querySelector('#next-btn');
   if (viewNext) {
     if (viewNext.disabled) { showToast('Complete this step before continuing.', 'error'); return; }
     viewNext.click();
@@ -105,7 +105,7 @@ export function buildFilename(folderPath, ext) {
 function saveProject() {
   const s = getState();
   const project = {
-    version:            1,
+    version:            2,   // v2 = 5-step numbering (Fit merged), per-file configs
     files:              s.files,
     discardedFiles:     s.discardedFiles,
     columnMap:          s.columnMap,
@@ -115,6 +115,9 @@ function saveProject() {
     circuitTree:        s.circuitTree,
     circuitConfig:      s.circuitConfig,
     fitResults:         s.fitResults,
+    fileConfigs:        s.fileConfigs,
+    labCircuit:         s.labCircuit,
+    labCircuits:        s.labCircuits,
     fitCacheKey:        s.fitCacheKey,
     fitTimeout:         s.fitTimeout,
     fitWeighting:       s.fitWeighting ?? 'none',
@@ -137,6 +140,9 @@ function loadProject(file) {
     try {
       const proj = JSON.parse(e.target.result);
       if (!proj.version) throw new Error('Not a valid EIS project file');
+      // v1 projects used 7-step numbering (Circuit 4 / Bounds 5 / Fit 6 / Trends 7).
+      let maxStep = proj.maxStep ?? 1;
+      if (proj.version < 2) maxStep = maxStep >= 7 ? 5 : maxStep >= 4 ? 4 : maxStep;
       setState({
         files:              proj.files              ?? [],
         discardedFiles:     proj.discardedFiles     ?? [],
@@ -147,12 +153,15 @@ function loadProject(file) {
         circuitTree:        proj.circuitTree        ?? { nodes: [] },
         circuitConfig:      proj.circuitConfig      ?? null,
         fitResults:         proj.fitResults         ?? [],
+        fileConfigs:        proj.fileConfigs        ?? {},
+        labCircuit:         proj.labCircuit         ?? null,
+        ...(proj.labCircuits?.length ? { labCircuits: proj.labCircuits } : {}),
         fitCacheKey:        proj.fitCacheKey        ?? null,
         fitTimeout:         proj.fitTimeout         ?? 60,
         fitWeighting:       proj.fitWeighting ?? 'none',
         fitSolver:          proj.fitSolver          ?? 'lm',
         drtLambda:          proj.drtLambda          ?? 1e-3,
-        maxStep:            proj.maxStep            ?? 1,
+        maxStep,
         step:               1,
       });
       navigate(1);
