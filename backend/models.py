@@ -15,6 +15,7 @@ class FileInfo(BaseModel):
     freq_min: Optional[float] = None      # per-file freq filter (from KK suggestion)
     freq_max: Optional[float] = None
     rs_estimate: Optional[float] = None   # HF real-axis intercept for R_s initialisation
+    exclude_freqs: Optional[List[float]] = None  # frequencies of points to drop (KK-flagged)
 
 
 class ScanFolderResponse(BaseModel):
