@@ -12,7 +12,11 @@ const WIRE_EXT = 26;
 const COLORS = {
   R: '#e05c5c', C: '#4a9ade', L: '#9b59b6',
   CPE: '#e67e22', W: '#27ae60', Wo: '#1abc9c', Ws: '#16a085',
+  La: '#8e44ad', G: '#c0392b',
 };
+
+// Longest symbols first so 'CPE' wins over 'C', 'Wo'/'Ws' over 'W', 'La' over 'L'.
+const KNOWN_ELEMENTS = ['CPE', 'Wo', 'Ws', 'La', 'R', 'C', 'L', 'W', 'G'];
 
 // Mirror of backend _strip_rc_pairs — used for the frame preview in optimize mode.
 function stripRcPairsFn(s) {
@@ -42,6 +46,8 @@ let dropZones   = [];    // [{id, type, nodeId?, x, y, w, h, mutate?: (newNode) 
 
 let _container, _navigate, _showToast;
 let _elements = [];
+let _editorMode = false;  // standalone editor (EIS Lab modal): don't touch global circuit state
+let _onChange   = null;   // editor-mode callback fired with the circuit string on every change
 
 // ── Tree helpers ─────────────────────────────────────────────────
 function treeToString(ns, counters = {}) {
@@ -57,8 +63,9 @@ function treeToString(ns, counters = {}) {
 }
 
 function stringToTree(str) {
-  // Simple recursive descent parser for impedance.py circuit string format
-  str = str.trim();
+  // Recursive descent parser for the impedance.py circuit string format.
+  // Strict: unknown elements, unbalanced parens, and trailing garbage all throw.
+  str = (str || '').replace(/\s+/g, '');
   if (!str) return [];
 
   function parseSeq(s, pos) {
@@ -79,108 +86,107 @@ function stringToTree(str) {
       const branches = [];
       while (pos < s.length && s[pos] !== ')') {
         const [branch, newPos] = parseSeq(s, pos);
-        branches.push(branch);
+        if (branch.length) branches.push(branch);   // ignore empty branches like "p(R1,)"
         pos = newPos;
         if (pos < s.length && s[pos] === ',') pos++;
       }
-      if (s[pos] === ')') pos++;
+      if (s[pos] !== ')') throw new Error(`Unclosed "p(" — missing ")"`);
+      pos++;
+      if (!branches.length) throw new Error('Empty parallel group "p()"');
       return [{ id: newId(), type: 'parallel', branches }, pos];
     }
-    // Component token
+    // Component token — validate against the known element set
     const match = s.slice(pos).match(/^([A-Za-z]+)\d*/);
-    if (!match) throw new Error(`Parse error at pos ${pos}: "${s.slice(pos)}"`);
-    const element = match[1];
+    if (!match) throw new Error(`Unexpected "${s[pos]}" at position ${pos}`);
+    const element = KNOWN_ELEMENTS.find(k => match[1] === k);
+    if (!element) throw new Error(`Unknown element "${match[1]}" (valid: ${KNOWN_ELEMENTS.join(', ')})`);
     pos += match[0].length;
     return [{ id: newId(), type: 'component', element }, pos];
   }
 
-  const [result] = parseSeq(str, 0);
-  return result;
+  const [result, endPos] = parseSeq(str, 0);
+  if (endPos !== str.length) throw new Error(`Unexpected "${str[endPos]}" at position ${endPos}`);
+  // Normalize: unwrap any single-branch parallels the syntax allowed (p(R1) → R1)
+  return normalizeTree(result);
+}
+
+// Remove empty branches, drop empty groups, and unwrap single-branch parallels
+// at every depth. Returns a structurally valid tree.
+function normalizeTree(ns) {
+  return ns.flatMap(n => {
+    if (n.type !== 'parallel') return [n];
+    const branches = n.branches.map(normalizeTree).filter(b => b.length > 0);
+    if (branches.length === 0) return [];
+    if (branches.length === 1) return branches[0];
+    return [{ ...n, branches }];
+  });
 }
 
 // ── History ──────────────────────────────────────────────────────
-function saveHistory() {
+// Commit-AFTER-mutation model: history[histPtr] is always the current state,
+// so both undo and redo restore real snapshots.
+function commitHistory() {
   history = history.slice(0, histPtr + 1);
   history.push(JSON.parse(JSON.stringify(nodes)));
   histPtr = history.length - 1;
 }
 
+function resetHistory() {
+  history = [JSON.parse(JSON.stringify(nodes))];
+  histPtr = 0;
+}
+
 function undo() {
-  if (histPtr > 0) { histPtr--; nodes = JSON.parse(JSON.stringify(history[histPtr])); renderCircuit(); syncString(); }
+  if (histPtr > 0) {
+    histPtr--;
+    nodes = JSON.parse(JSON.stringify(history[histPtr]));
+    selectedId = null;
+    renderCircuit(); syncString();
+  }
 }
 function redo() {
-  if (histPtr < history.length - 1) { histPtr++; nodes = JSON.parse(JSON.stringify(history[histPtr])); renderCircuit(); syncString(); }
+  if (histPtr < history.length - 1) {
+    histPtr++;
+    nodes = JSON.parse(JSON.stringify(history[histPtr]));
+    selectedId = null;
+    renderCircuit(); syncString();
+  }
 }
 
 // ── Mutations ────────────────────────────────────────────────────
+// Every user-visible mutation ends with: commitHistory(); renderCircuit(); syncString();
+
+// Re-normalize in place after a removal (drop empty branches, unwrap
+// single-branch parallels at any depth).
+function cleanupTree() {
+  nodes = normalizeTree(nodes);
+}
+
 function insertAt(pos, node) {
-  saveHistory();
-  nodes = [...nodes.slice(0, pos), node, ...nodes.slice(pos)];
+  nodes.splice(Math.min(pos, nodes.length), 0, node);
   selectedId = node.id;
+  commitHistory();
   renderCircuit(); syncString();
 }
 
 function deleteNodeById(id) {
-  saveHistory();
-  function removeFrom(ns) {
-    return ns
-      .filter(n => n.id !== id)
-      .map(n => n.type === 'parallel'
-        ? { ...n, branches: n.branches.map(b => removeFrom(b)).filter(b => b.length > 0) }
-        : n);
-  }
-  nodes = removeFrom(nodes);
-  // Unwrap single-branch parallels
-  function unwrap(ns) {
-    return ns.flatMap(n => {
-      if (n.type === 'parallel' && n.branches.length === 1) return unwrap(n.branches[0]);
-      if (n.type === 'parallel') return [{ ...n, branches: n.branches.map(unwrap) }];
-      return [n];
-    });
-  }
-  nodes = unwrap(nodes);
+  const hit = findInTree(nodes, id);
+  if (!hit) return;
+  hit.arr.splice(hit.idx, 1);
+  cleanupTree();
   selectedId = null;
-  renderCircuit(); syncString();
-}
-
-function makeParallelWith(id1, id2) {
-  saveHistory();
-  const n1 = nodes.find(n => n.id === id1);
-  const n2 = nodes.find(n => n.id === id2);
-  if (!n1 || !n2) return;
-  const pg = { id: newId(), type: 'parallel', branches: [[n1], [n2]] };
-  const i = nodes.indexOf(n1);
-  nodes = nodes.filter(n => n.id !== id1 && n.id !== id2);
-  nodes.splice(i, 0, pg);
-  selectedId = pg.id;
+  commitHistory();
   renderCircuit(); syncString();
 }
 
 function addBranchToGroup(groupId) {
-  saveHistory();
-  function addBranch(ns) {
-    return ns.map(n => {
-      if (n.id === groupId) {
-        const newNode = { id: newId(), type: 'component', element: 'R' };
-        return { ...n, branches: [...n.branches, [newNode]] };
-      }
-      if (n.type === 'parallel') return { ...n, branches: n.branches.map(b => addBranch(b)) };
-      return n;
-    });
-  }
-  nodes = addBranch(nodes);
+  const g = findNode(nodes, groupId);
+  if (!g || g.type !== 'parallel') return;
+  const newNode = { id: newId(), type: 'component', element: 'R' };
+  g.branches.push([newNode]);
+  selectedId = newNode.id;
+  commitHistory();
   renderCircuit(); syncString();
-}
-
-function dropToGap(position, element) {
-  insertAt(position, { id: newId(), type: 'component', element });
-}
-
-function dropOnComponent(targetId, element) {
-  // Create parallel group: existing + new
-  const newComp = { id: newId(), type: 'component', element };
-  const existing = nodes.find(n => n.id === targetId);
-  if (existing) makeParallelWith_new(targetId, newComp);
 }
 
 // Search the tree recursively and return { arr, idx } where arr[idx] has the given id.
@@ -198,14 +204,16 @@ function findInTree(ns, id) {
   return null;
 }
 
-function makeParallelWith_new(existingId, newNode) {
+// Wrap the node with `existingId` and `newNode` into a new parallel group,
+// in place, at any depth. Returns true on success. Caller commits/renders.
+function wrapInParallel(existingId, newNode) {
   const hit = findInTree(nodes, existingId);
-  if (!hit) return;
+  if (!hit) return false;
   const existing = hit.arr[hit.idx];
   const pg = { id: newId(), type: 'parallel', branches: [[existing], [newNode]] };
   hit.arr.splice(hit.idx, 1, pg);   // replace in the actual parent array, any depth
   selectedId = pg.id;
-  renderCircuit(); syncString();
+  return true;
 }
 
 // ── Measure ──────────────────────────────────────────────────────
@@ -287,12 +295,21 @@ function renderCircuit() {
     });
     el.addEventListener('click', e => {
       e.stopPropagation();
-      selectedId = el.dataset.nodeId === selectedId ? null : el.dataset.nodeId;
-      renderCircuit();
+      if (consumeSuppressedClick()) return;   // click at the end of a drag isn't a click
+      const id = el.dataset.nodeId;
+      const node = findNode(nodes, id);
+      if (node?.type === 'component') {
+        deleteNodeById(id);                   // clicking a component removes it directly
+      } else {
+        selectedId = id === selectedId ? null : id;   // groups: select to reveal ✕
+        renderCircuit();
+      }
     });
   });
 
-  svg.querySelectorAll('.delete-btn').forEach(el => {
+  // Only the <g> wrapper carries data-delete-id — the inner ✕ <text> also has
+  // the class, and binding it too swallowed clicks with an undefined id.
+  svg.querySelectorAll('[data-delete-id]').forEach(el => {
     el.addEventListener('click', e => { e.stopPropagation(); deleteNodeById(el.dataset.deleteId); });
   });
 
@@ -300,22 +317,34 @@ function renderCircuit() {
     el.addEventListener('click', e => { e.stopPropagation(); addBranchToGroup(el.dataset.groupId); });
   });
 
-  svg.addEventListener('click', () => { selectedId = null; renderCircuit(); });
+  // Property assignment, not addEventListener — renderCircuit runs constantly
+  // and stacking a new listener per render made background clicks cascade.
+  svg.onclick = () => {
+    if (consumeSuppressedClick()) return;
+    selectedId = null;
+    renderCircuit();
+  };
 }
 
 // Builds SVG HTML for a series chain and returns endX.
-// `ns` is the actual live array (top-level `nodes` or a branch array);
-// mutate closures capture it directly so drops into sub-branches work.
-function buildSeriesHtml(ns, startX, cy, counters) {
+// Gap drop zones are ID-ANCHORED descriptors (before/after which node), not
+// array closures — they are resolved against the live tree at drop time, so
+// they stay valid even after the dragged node is detached and the tree
+// re-normalized mid-gesture.
+function buildSeriesHtml(ns, startX, cy, counters, groupId = null, branchIdx = 0) {
   let x = startX;
   let html = '';
 
-  // Gap drop zone before first element
-  dropZones.push({
-    id: `gap-0-${startX}`, type: 'gap',
-    x: x - 12, y: cy - COMP_H, w: 24, h: COMP_H * 2,
-    mutate: (newNode) => ns.splice(0, 0, newNode),
+  const gapZone = (index, gx, gw) => ({
+    id: `gap-${groupId ?? 'root'}-${branchIdx}-${index}`, type: 'gap',
+    x: gx, y: cy - COMP_H, w: gw, h: COMP_H * 2,
+    groupId, branchIdx, index,
+    beforeId: ns[index - 1]?.id ?? null,   // node left of the gap
+    afterId:  ns[index]?.id ?? null,       // node right of the gap
   });
+
+  // Gap drop zone before first element
+  dropZones.push(gapZone(0, x - 12, 24));
 
   for (let i = 0; i < ns.length; i++) {
     const node = ns[i];
@@ -330,26 +359,15 @@ function buildSeriesHtml(ns, startX, cy, counters) {
     x += size.w;
 
     if (i < ns.length - 1) {
-      // Wire and gap drop zone between elements.
-      // `i` is captured per-iteration by `let` — closure is correct.
-      const insertAt = i + 1;
-      const gapX = x;
-      dropZones.push({
-        id: `gap-${insertAt}-${startX}`, type: 'gap',
-        x: gapX + 2, y: cy - COMP_H, w: H_GAP - 4, h: COMP_H * 2,
-        mutate: (newNode) => ns.splice(insertAt, 0, newNode),
-      });
-      html += `<line class="wire-line" x1="${gapX}" y1="${cy}" x2="${gapX + H_GAP}" y2="${cy}"/>`;
+      // Wire and gap drop zone between elements
+      dropZones.push(gapZone(i + 1, x + 2, H_GAP - 4));
+      html += `<line class="wire-line" x1="${x}" y1="${cy}" x2="${x + H_GAP}" y2="${cy}"/>`;
       x += H_GAP;
     }
   }
 
   // Gap drop zone after last element
-  dropZones.push({
-    id: `gap-end-${startX}`, type: 'gap',
-    x: x + 2, y: cy - COMP_H, w: 22, h: COMP_H * 2,
-    mutate: (newNode) => ns.splice(ns.length, 0, newNode),
-  });
+  dropZones.push(gapZone(ns.length, x + 2, 22));
 
   return { html, endX: x };
 }
@@ -413,7 +431,7 @@ function buildParallelHtml(node, x, cy, counters) {
     const branchX    = leftX + BUS_W;
 
     html += `<line class="wire-line" x1="${leftX}" y1="${branchCY}" x2="${branchX}" y2="${branchCY}"/>`;
-    const { html: branchHtml, endX: branchEndX } = buildSeriesHtml(node.branches[i], branchX, branchCY, counters);
+    const { html: branchHtml, endX: branchEndX } = buildSeriesHtml(node.branches[i], branchX, branchCY, counters, node.id, i);
     html += branchHtml;
     html += `<line class="wire-line" x1="${branchEndX}" y1="${branchCY}" x2="${rightX}" y2="${branchCY}"/>`;
 
@@ -442,28 +460,39 @@ function syncString() {
   const str = treeToString(nodes);
   const input = _container.querySelector('#circuit-string');
   if (input) input.value = str;
+  if (_editorMode) { _onChange?.(str); return; }   // editor edits stay local to the modal
   setState({ circuitTree: { nodes }, circuitString: str });
 }
 
 // ── Drag-and-drop ────────────────────────────────────────────────
-function startPaletteDrag(e, element) {
-  dragState = { source: 'palette', element };
-  createGhost(e.clientX, e.clientY, element);
+const DRAG_THRESHOLD = 4;   // px of movement before a mousedown becomes a drag
+let _suppressClick = false; // swallow the click that the browser fires right after a drag
+
+function consumeSuppressedClick() {
+  const s = _suppressClick;
+  _suppressClick = false;
+  return s;
+}
+
+// A mousedown only ARMS a potential drag; the ghost and drop zones appear once
+// the pointer moves past the threshold. A plain click therefore never enters
+// the drop path (which used to delete the clicked component by "dropping" it
+// onto itself).
+function armDrag(e, drag) {
+  dragState = { ...drag, dragging: false, startX: e.clientX, startY: e.clientY };
   document.addEventListener('mousemove', onDragMove);
   document.addEventListener('mouseup', onDragEnd);
   e.preventDefault();
 }
 
+function startPaletteDrag(e, element) {
+  armDrag(e, { source: 'palette', element });
+}
+
 function startCanvasDrag(e, nodeId) {
-  // For now, clicking selects. True in-canvas reorder is handled by select+arrows.
-  // Canvas drag will be 'pick up and re-drop':
   const node = findNode(nodes, nodeId);
-  if (!node || node.type !== 'component') return;
-  dragState = { source: 'canvas', nodeId, element: node.element };
-  createGhost(e.clientX, e.clientY, node.element);
-  document.addEventListener('mousemove', onDragMove);
-  document.addEventListener('mouseup', onDragEnd);
-  e.preventDefault();
+  if (!node || node.type !== 'component') return;   // groups aren't draggable
+  armDrag(e, { source: 'canvas', nodeId, element: node.element });
 }
 
 function findNode(ns, id) {
@@ -478,50 +507,93 @@ function findNode(ns, id) {
 
 function onDragMove(e) {
   if (!dragState) return;
+  if (!dragState.dragging) {
+    if (Math.hypot(e.clientX - dragState.startX, e.clientY - dragState.startY) < DRAG_THRESHOLD) return;
+    dragState.dragging = true;
+    createGhost(e.clientX, e.clientY, dragState.element);
+  }
   moveGhost(e.clientX, e.clientY);
   updateDropHighlight(e.clientX, e.clientY);
   renderCircuit(); // re-render to show drop zone highlights
 }
 
 function onDragEnd(e) {
-  if (!dragState) return;
-
-  const dz = getActiveDZ(e.clientX, e.clientY);
-  if (dz) {
-    // Single history snapshot for the entire drag operation — before any mutation.
-    saveHistory();
-    if (dragState.source === 'canvas') {
-      deleteNodeSilent(dragState.nodeId);
-    }
-    performDrop(dragState, dz);
-  }
-
+  const drag = dragState;
   destroyGhost();
   dragState = null;
   activeDZId = null;
   document.removeEventListener('mousemove', onDragMove);
   document.removeEventListener('mouseup', onDragEnd);
-  renderCircuit();
-}
+  if (!drag) return;
 
-function deleteNodeSilent(id) {
-  function removeFrom(ns) {
-    return ns.filter(n => n.id !== id).map(n => n.type === 'parallel'
-      ? { ...n, branches: n.branches.map(b => removeFrom(b)).filter(b => b.length > 0) }
-      : n);
+  if (drag.dragging) {
+    _suppressClick = true;                       // the trailing click is part of this gesture
+    setTimeout(() => { _suppressClick = false; });   // don't let it leak past this event burst
+    const dz = getActiveDZ(e.clientX, e.clientY);
+    if (dz) applyDrop(drag, dz);
+    renderCircuit();
   }
-  nodes = removeFrom(nodes);
+  // No re-render on a plain click: replacing the SVG DOM during mouseup makes
+  // the browser skip the native click event, which killed click-to-remove.
 }
 
-function performDrop(drag, dz) {
-  const newNode = { id: newId(), type: 'component', element: drag.element };
-  if (dz.type === 'gap' && dz.mutate) {
-    dz.mutate(newNode);
-    selectedId = newNode.id;
-    renderCircuit(); syncString();
+// Resolve a gap descriptor against the CURRENT tree. Anchor nodes win (they
+// survive re-normalization); structural path is the fallback for empty series.
+function resolveGapTarget(dz) {
+  if (dz.afterId) {
+    const hit = findInTree(nodes, dz.afterId);
+    if (hit) return { arr: hit.arr, idx: hit.idx };
+  }
+  if (dz.beforeId) {
+    const hit = findInTree(nodes, dz.beforeId);
+    if (hit) return { arr: hit.arr, idx: hit.idx + 1 };
+  }
+  let arr = nodes;
+  if (dz.groupId) {
+    const g = findNode(nodes, dz.groupId);
+    if (!g || g.type !== 'parallel' || !g.branches.length) return null;
+    arr = g.branches[Math.min(dz.branchIdx, g.branches.length - 1)];
+  }
+  return { arr, idx: Math.min(dz.index, arr.length) };
+}
+
+// One atomic drop: detach (canvas drags), re-normalize, insert at the resolved
+// target. Any failure rolls the whole gesture back; only real changes commit.
+function applyDrop(drag, dz) {
+  // Dropping a component onto itself is a no-op, not a delete
+  if (drag.source === 'canvas' && dz.type === 'on-component' && dz.nodeId === drag.nodeId) return;
+
+  const pre = JSON.stringify(nodes);
+  let moved;
+  if (drag.source === 'canvas') {
+    const hit = findInTree(nodes, drag.nodeId);
+    if (!hit) return;
+    moved = hit.arr[hit.idx];
+    hit.arr.splice(hit.idx, 1);
+    cleanupTree();
+  } else {
+    moved = { id: newId(), type: 'component', element: drag.element };
+  }
+
+  let ok = false;
+  if (dz.type === 'gap') {
+    const target = resolveGapTarget(dz);
+    if (target) {
+      target.arr.splice(target.idx, 0, moved);
+      selectedId = moved.id;
+      ok = true;
+    }
   } else if (dz.type === 'on-component') {
-    makeParallelWith_new(dz.nodeId, newNode);
-    // makeParallelWith_new already calls renderCircuit + syncString
+    ok = wrapInParallel(dz.nodeId, moved);
+  }
+
+  if (!ok) {
+    nodes = JSON.parse(pre);   // failed drop must never lose a component
+    return;
+  }
+  if (JSON.stringify(nodes) !== pre) {
+    commitHistory();
+    syncString();
   }
 }
 
@@ -573,6 +645,13 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
     async onEnter() {
       const state = getState();
 
+      // Re-assert module context — an EIS Lab editor may have borrowed it.
+      _container  = container;
+      _navigate   = navigate;
+      _showToast  = showToast;
+      _editorMode = false;
+      _onChange   = null;
+
       // Unconditionally reset all module-level working state from saved state.
       // The !nodes.length guard caused stale circuit/history when navigating away and back.
       _idCounter = 0;
@@ -585,7 +664,7 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
       if (state.circuitString) {
         try { nodes = stringToTree(state.circuitString); } catch (_) {}
       }
-      saveHistory();
+      resetHistory();
 
       // Load elements list once
       if (!_elements.length) {
@@ -622,7 +701,7 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
 
         <!-- Fixed: full circuit builder -->
         <div id="section-fixed" style="display:${fitModeVal === 'fixed' ? 'block' : 'none'};">
-          <div class="section-sub" style="margin-bottom:14px;">Drag components from the palette onto the canvas, or click to append. Drop on an existing component to create a parallel branch.</div>
+          <div class="section-sub" style="margin-bottom:14px;">Click a palette component to append it, or drag it onto the canvas. Drop on an existing component to create a parallel branch. Click a placed component to remove it.</div>
           <div class="circuit-workspace">
             <div class="palette">
               <div class="palette-title">Components</div>
@@ -738,6 +817,7 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
       // Palette: click = append, mousedown = drag
       container.querySelectorAll('.palette-item').forEach(item => {
         item.addEventListener('click', () => {
+          if (consumeSuppressedClick()) return;   // drag released over the palette
           insertAt(nodes.length, { id: newId(), type: 'component', element: item.dataset.element });
         });
         item.addEventListener('mousedown', e => {
@@ -749,14 +829,15 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
       container.querySelector('#undo-btn').addEventListener('click', undo);
       container.querySelector('#redo-btn').addEventListener('click', redo);
       container.querySelector('#clear-btn').addEventListener('click', () => {
-        saveHistory(); nodes = []; selectedId = null; renderCircuit(); syncString();
+        nodes = []; selectedId = null; commitHistory(); renderCircuit(); syncString();
       });
 
       container.querySelector('#apply-str-btn').addEventListener('click', () => {
         const val = container.querySelector('#circuit-string').value.trim();
         try {
           nodes = stringToTree(val);
-          saveHistory();
+          selectedId = null;
+          commitHistory();
           renderCircuit(); syncString();
           container.querySelector('#circuit-string').classList.remove('error');
         } catch (err) {
@@ -805,17 +886,135 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
           };
           // Persist circuit string (frame) from whatever was last built, even if empty.
           const str = treeToString(nodes);
-          setState({ circuitTree: { nodes }, circuitString: str, maxStep: Math.max(getState().maxStep, 5), optimizeConfig });
-          navigate(5);
+          setState({ circuitTree: { nodes }, circuitString: str, optimizeConfig });
+          navigate('bounds');
         } else {
           const str = treeToString(nodes);
           if (!str) { showToast('Build a circuit first.', 'error'); return; }
-          setState({ circuitTree: { nodes }, circuitString: str, maxStep: Math.max(getState().maxStep, 5), optimizeConfig: { enabled: false } });
-          navigate(5);
+          setState({ circuitTree: { nodes }, circuitString: str, optimizeConfig: { enabled: false } });
+          navigate('bounds');
         }
       });
 
       renderCircuit();
     }
+  };
+}
+
+// ── Standalone circuit editor (EIS Lab modal) ────────────────────
+// Mounts the palette + canvas + toolbar into hostEl without touching the
+// global batch circuit state. Only one builder can be live at a time (they
+// share module state) — destroy() restores the previous context, and the
+// batch view's onEnter re-asserts its own on entry.
+export async function mountCircuitEditor(hostEl, { initial = '', showToast, onChange } = {}) {
+  const prev = {
+    container: _container, showToast: _showToast,
+    editorMode: _editorMode, onChange: _onChange,
+  };
+
+  if (!_elements.length) {
+    try {
+      const res = await fetch('/api/elements');
+      _elements = await res.json();
+    } catch (_) {}
+  }
+
+  _container  = hostEl;
+  _showToast  = showToast ?? _showToast;
+  _editorMode = true;
+  _onChange   = onChange ?? null;
+
+  _idCounter = 0;
+  nodes      = [];
+  history    = [];
+  histPtr    = -1;
+  selectedId = null;
+  dragState  = null;
+  if (initial) {
+    try { nodes = stringToTree(initial); } catch (_) {}
+  }
+  resetHistory();
+
+  hostEl.innerHTML = `
+    <div class="circuit-workspace">
+      <div class="palette">
+        <div class="palette-title">Components</div>
+        ${_elements.map(el => `
+          <div class="palette-item" data-element="${el.symbol}" title="${el.description}">
+            <div class="palette-dot" style="background:${el.color}"></div>
+            <span>${el.symbol}</span>
+          </div>
+        `).join('')}
+      </div>
+      <div class="canvas-area">
+        <div class="circuit-svg-container" id="svg-container">
+          <svg id="circuit-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+        <div class="circuit-toolbar">
+          <button class="btn btn-secondary btn-sm" id="undo-btn" title="Undo">↩ Undo</button>
+          <button class="btn btn-secondary btn-sm" id="redo-btn" title="Redo">↪ Redo</button>
+          <button class="btn btn-danger btn-sm" id="clear-btn">✕ Clear</button>
+          <input type="text" class="circuit-string-input" id="circuit-string" placeholder="R0-p(R1,C1)" value="${initial}">
+          <button class="btn btn-secondary btn-sm" id="apply-str-btn">Apply</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  hostEl.querySelectorAll('.palette-item').forEach(item => {
+    item.addEventListener('click', () => {
+      if (consumeSuppressedClick()) return;   // drag released over the palette
+      insertAt(nodes.length, { id: newId(), type: 'component', element: item.dataset.element });
+    });
+    item.addEventListener('mousedown', e => {
+      if (e.button !== 0) return;
+      startPaletteDrag(e, item.dataset.element);
+    });
+  });
+
+  hostEl.querySelector('#undo-btn').addEventListener('click', undo);
+  hostEl.querySelector('#redo-btn').addEventListener('click', redo);
+  hostEl.querySelector('#clear-btn').addEventListener('click', () => {
+    nodes = []; selectedId = null; commitHistory(); renderCircuit(); syncString();
+  });
+
+  hostEl.querySelector('#apply-str-btn').addEventListener('click', () => {
+    const val = hostEl.querySelector('#circuit-string').value.trim();
+    try {
+      nodes = stringToTree(val);
+      selectedId = null;
+      commitHistory();
+      renderCircuit(); syncString();
+      hostEl.querySelector('#circuit-string').classList.remove('error');
+    } catch (err) {
+      hostEl.querySelector('#circuit-string').classList.add('error');
+      _showToast?.(`Invalid circuit string: ${err.message}`, 'error');
+    }
+  });
+  hostEl.querySelector('#circuit-string').addEventListener('keydown', e => {
+    if (e.key === 'Enter') hostEl.querySelector('#apply-str-btn').click();
+  });
+
+  renderCircuit();
+
+  return {
+    getCircuit: () => treeToString(nodes),
+    setCircuit(str) {
+      nodes = str ? stringToTree(str) : [];   // throws on invalid — caller handles
+      selectedId = null;
+      commitHistory();
+      renderCircuit(); syncString();
+    },
+    destroy() {
+      destroyGhost();
+      dragState = null;
+      document.removeEventListener('mousemove', onDragMove);
+      document.removeEventListener('mouseup', onDragEnd);
+      hostEl.innerHTML = '';
+      _container  = prev.container;
+      _showToast  = prev.showToast;
+      _editorMode = prev.editorMode;
+      _onChange   = prev.onChange;
+    },
   };
 }
