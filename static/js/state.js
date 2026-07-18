@@ -29,9 +29,28 @@ const _defaults = {
   fitWeighting: 'none',
   fitSolver: 'lm',
   omitInductive: false,
-  kkData: {},   // path → { freqMin, freqMax, rsEst, M, mu } from last KK run
+  excludeKKFlagged: true,  // drop KK-flagged (red) points from the fit
+  kkData: {},     // path → { freqMin, freqMax, rsEst, M, mu, flaggedFreqs } from last KK run
+  kkResults: [],  // full KKResult list — survives navigation so tiles keep their KK badges
   fitting: false,
-  _sv: 2,           // schema version — bump when step numbering changes
+  fitSubTab: 'batch',      // active sub-tab inside the Fit step: 'batch' | 'lab'
+  batchSection: 'circuit', // active section inside Batch Fitting: 'circuit' | 'bounds' | 'run'
+  fileConfigs: {},         // path → per-file fit config snapshot from the last batch run that included it
+  labCircuit: null,        // selected EIS Lab card id (or '__batch__'), sticky across files
+  labSelectedPath: null,   // file currently open in the EIS Lab
+  labCircuits: [           // editable named circuit cards shown in the EIS Lab
+    { id: 'rc',        name: 'R + RC',          circuit: 'R0-p(R1,C1)' },
+    { id: 'rq',        name: 'R + RQ',          circuit: 'R0-p(R1,CPE1)' },
+    { id: 'rc2',       name: 'R + 2×RC',        circuit: 'R0-p(R1,C1)-p(R2,C2)' },
+    { id: 'rq2',       name: 'R + 2×RQ',        circuit: 'R0-p(R1,CPE1)-p(R2,CPE2)' },
+    { id: 'rq3',       name: 'R + 3×RQ',        circuit: 'R0-p(R1,CPE1)-p(R2,CPE2)-p(R3,CPE3)' },
+    { id: 'randles-w', name: 'Randles (W)',     circuit: 'R0-p(R1-W1,C1)' },
+    { id: 'randles-q', name: 'Randles (Wo+Q)',  circuit: 'R0-p(R1-Wo1,CPE1)' },
+    { id: 'l-rq',      name: 'L + R + RQ',      circuit: 'L0-R0-p(R1,CPE1)' },
+    { id: 'l-rq2',     name: 'L + R + 2×RQ',    circuit: 'L0-R0-p(R1,CPE1)-p(R2,CPE2)' },
+    { id: 'rq2-ws',    name: '2×RQ + Ws',       circuit: 'R0-p(R1,CPE1)-p(R2,CPE2)-Ws1' },
+  ],
+  _sv: 3,           // schema version — bump when step numbering changes
 };
 
 let _state = { ..._defaults };
@@ -55,15 +74,28 @@ function _load() {
         if (parsed.step >= 3) parsed.step = Math.min(parsed.step + 1, 7);
         parsed._sv = 2;
       }
+      // Migration to schema v3: Build Circuit / Set Bounds / Fit (4/5/6) merged
+      // into a single Fit step 4; Trends moved 7 → 5.
+      if (parsed._sv < 3) {
+        const mapStep = n => (n >= 7 ? 5 : n >= 4 ? 4 : n);
+        // Land users who were mid-flow on the right Batch Fitting section.
+        if (parsed.step === 5)      parsed.batchSection = 'bounds';
+        else if (parsed.step >= 6)  parsed.batchSection = 'run';
+        parsed.step    = mapStep(parsed.step ?? 1);
+        parsed.maxStep = mapStep(parsed.maxStep ?? 1);
+        parsed._sv = 3;
+      }
       _state = { ..._defaults, ...parsed, fitting: false };
 
       // Defensive: ensure maxStep is never lower than what saved data implies.
       // Guards against half-migrated states or in-dev schema bumps.
-      if (_state.fitResults?.length)  _state.maxStep = Math.max(_state.maxStep, 7);
-      if (_state.circuitConfig)        _state.maxStep = Math.max(_state.maxStep, 6);
-      if (_state.circuitString)        _state.maxStep = Math.max(_state.maxStep, 5);
+      if (_state.fitResults?.length)  _state.maxStep = Math.max(_state.maxStep, 5);
+      if (_state.circuitConfig)        _state.maxStep = Math.max(_state.maxStep, 4);
+      if (_state.circuitString)        _state.maxStep = Math.max(_state.maxStep, 4);
       if (_state.columnMap)            _state.maxStep = Math.max(_state.maxStep, 3);
       if (_state.files?.length)        _state.maxStep = Math.max(_state.maxStep, 2);
+      _state.maxStep = Math.min(_state.maxStep, 5);
+      _state.step    = Math.min(_state.step, _state.maxStep);
     }
   } catch (_) { /* ignore */ }
 }
