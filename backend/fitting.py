@@ -919,6 +919,21 @@ async def fit_batch_stream(request: FitRequest) -> AsyncGenerator[str, None]:
                     frequencies = frequencies[mask]
                     Z = Z[mask]
 
+                # Drop KK-flagged points by frequency value (match with relative
+                # tolerance — KK may have run on a freq-filtered subset, so
+                # indices don't line up but frequency values do).
+                if file_info.exclude_freqs:
+                    excl = np.asarray(file_info.exclude_freqs)
+                    keep = ~np.any(
+                        np.isclose(frequencies[:, None], excl[None, :], rtol=1e-6),
+                        axis=1,
+                    )
+                    if not keep.any():
+                        raise ValueError("No data points remain after excluding KK-flagged points")
+                    if not keep.all():
+                        frequencies = frequencies[keep]
+                        Z = Z[keep]
+
                 if request.omit_inductive:
                     inductive_mask = Z.imag <= 0
                     if inductive_mask.any():
