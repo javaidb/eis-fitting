@@ -1,5 +1,6 @@
 import { getState, setState } from '../state.js';
 import { characterizeFiles, getSpectrum } from '../api.js';
+import { computeFieldStyles, idCellHtml } from '../table-colors.js';
 
 export function ColumnMapperView(container, { navigate, showToast }) {
 
@@ -9,6 +10,8 @@ export function ColumnMapperView(container, { navigate, showToast }) {
   const _spectrumCache = new Map();    // path|mapping-signature → spectrum
   let _charLabels = [];                // characterization labels shown as value columns
   let _charValues = new Map();         // path → { label: value }
+  let _sortField = null;               // '__file' | <char label> | null = path order
+  let _sortDir   = 1;                  // 1 asc, -1 desc
   let _batteryIds = [];        // sorted string array, e.g. ['1','2','3']
   let _colsByBattery = {};     // { bid_str: string[] }
   let _showPerBattery = false; // true when ≥2 distinct battery IDs detected
@@ -190,6 +193,9 @@ export function ColumnMapperView(container, { navigate, showToast }) {
     const skipFirstRow = cm.skip_first_data_row ?? false;
 
     container.innerHTML = `
+      <div class="mapper-layout">
+      <div class="mapper-main">
+
       <div class="section-header">Map Columns</div>
       <div class="section-sub">Assign which CSV columns correspond to which parameters.</div>
 
@@ -197,9 +203,6 @@ export function ColumnMapperView(container, { navigate, showToast }) {
         <div class="card" style="border-color:var(--warning);">
           <span style="color:var(--warning);">⚠ Column headers differ between files. Using union of all columns — verify assignments carefully.</span>
         </div>` : ''}
-
-      <div class="mapper-layout">
-      <div class="mapper-main">
 
       <div class="card">
         <div class="card-title">EIS Data Columns (required for fitting)</div>
@@ -364,10 +367,27 @@ export function ColumnMapperView(container, { navigate, showToast }) {
       return a.path.localeCompare(b.path, undefined, { numeric: true });
     }
 
-    // Active + discarded files, in stable path order — the preview shows both.
+    // Active + discarded files — path order by default, or the clicked
+    // header's sort (numeric-aware, missing values last).
     function previewFiles() {
       const s = getState();
-      return [...(s.files || []), ...(s.discardedFiles || [])].sort(byPath);
+      const list = [...(s.files || []), ...(s.discardedFiles || [])].sort(byPath);
+      if (!_sortField) return list;
+      const val = f => _sortField === '__file'
+        ? fileDisplayName(f)
+        : (_charValues.get(f.path) || {})[_sortField] ?? null;
+      list.sort((a, b) => {
+        const va = val(a), vb = val(b);
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1;
+        if (vb == null) return -1;
+        const na = Number(va), nb = Number(vb);
+        const cmp = Number.isFinite(na) && Number.isFinite(nb)
+          ? na - nb
+          : String(va).localeCompare(String(vb), undefined, { numeric: true });
+        return _sortDir * cmp;
+      });
+      return list;
     }
 
     function previewGridTpl() {
@@ -387,7 +407,9 @@ export function ColumnMapperView(container, { navigate, showToast }) {
     function previewItemsHtml() {
       const discardedPaths = new Set((getState().discardedFiles || []).map(f => f.path));
       const tpl = previewGridTpl();
-      return previewFiles().map(f => {
+      const list = previewFiles();
+      const styles = computeFieldStyles(_charLabels, list, _charValues);
+      return list.map(f => {
         const off  = discardedPaths.has(f.path);
         const vals = _charValues.get(f.path) || {};
         return `
@@ -396,7 +418,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
                style="display:grid;grid-template-columns:${tpl};"
                title="${fileDisplayName(f)}${off ? ' — excluded from analysis' : ''}">
             <span style="color:var(--accent);">📄</span><span>${fileDisplayName(f)}</span>
-            ${_charLabels.map(l => `<span class="preview-val" title="${l}: ${fmtCharVal(vals[l])}">${fmtCharVal(vals[l])}</span>`).join('')}
+            ${_charLabels.map(l => `<span class="preview-val" title="${l}: ${fmtCharVal(vals[l])}">${idCellHtml(vals[l], styles[l])}</span>`).join('')}
             <button class="preview-discard-btn"
                     title="${off ? 'Re-include in analysis' : 'Exclude from analysis'}">${off ? '↺' : '⊘'}</button>
           </div>`;
@@ -409,8 +431,14 @@ export function ColumnMapperView(container, { navigate, showToast }) {
       if (!_charLabels.length) { el.style.display = 'none'; return; }
       el.style.display = 'grid';
       el.style.gridTemplateColumns = previewGridTpl();
-      el.innerHTML = `<span></span><span>File</span>
-        ${_charLabels.map(l => `<span title="${l}">${l}</span>`).join('')}<span></span>`;
+      const th = (key, label) => {
+        const active = _sortField === key;
+        const arrow  = active ? (_sortDir === 1 ? '↑' : '↓') : '↕';
+        return `<span class="preview-sort${active ? ' sorted' : ''}" data-sortkey="${key}"
+                     title="Sort by ${label}">${label} <span class="sort-arrow">${arrow}</span></span>`;
+      };
+      el.innerHTML = `<span></span>${th('__file', 'File')}
+        ${_charLabels.map(l => th(l, l)).join('')}<span></span>`;
     }
 
     // Read the characterization parameter rows as currently edited (unsaved).
@@ -595,6 +623,21 @@ export function ColumnMapperView(container, { navigate, showToast }) {
       loadCharValues();
       const path = _previewPath ?? previewFiles()[0]?.path;
       if (path) showPreview(path, { force: true });
+    });
+
+    // Header clicks: asc → desc → back to path order
+    container.querySelector('#preview-list-header').addEventListener('click', e => {
+      const s = e.target.closest('[data-sortkey]');
+      if (!s) return;
+      const key = s.dataset.sortkey;
+      if (_sortField === key) {
+        if (_sortDir === 1) _sortDir = -1;
+        else { _sortField = null; _sortDir = 1; }
+      } else {
+        _sortField = key; _sortDir = 1;
+      }
+      renderPreviewHeader();
+      refreshPreviewList();
     });
 
     updateActiveCount();
