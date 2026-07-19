@@ -1885,3 +1885,34 @@ select option { background: var(--surface2); }
 .lab-file-table .sort-arrow { opacity: 0.45; font-size: 10px; }
 .lab-file-table th.sorted { color: var(--accent); }
 .lab-file-table th.sorted .sort-arrow { opacity: 1; }
+
+/* Map Columns — preview fills the viewport exactly; table and plot split 50/50 */
+.mapper-preview { top: 28px; }   /* pin at the view's own padding so the card never shifts */
+.mapper-preview .card {
+  display: flex;
+  flex-direction: column;
+  /* 60px app header + 28px view padding top + 28px bottom = exact viewport fit */
+  height: calc(100vh - 116px);
+  margin-bottom: 0;
+}
+.mapper-preview .preview-file-list {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+}
+.mapper-preview .preview-plot {
+  flex: 1 1 0;
+  min-height: 0;
+  height: auto;
+}
+.preview-sort { cursor: pointer; user-select: none; white-space: nowrap; }
+.preview-sort:hover { color: var(--text); }
+.preview-sort.sorted { color: var(--accent); }
+.preview-sort .sort-arrow { opacity: 0.5; font-size: 9px; }
+.preview-sort.sorted .sort-arrow { opacity: 1; }
+.preview-val .lab-id-chip { font-size: 11px; padding: 0 6px; }
+@media (max-width: 1100px) {
+  .mapper-preview .card { height: auto; }
+  .mapper-preview .preview-file-list { max-height: 220px; flex: none; }
+  .mapper-preview .preview-plot { height: 340px; flex: none; }
+}
