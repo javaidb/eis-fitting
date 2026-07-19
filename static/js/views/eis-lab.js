@@ -42,6 +42,62 @@ function pathToSafeId(path) {
   return (path || '').replace(/[^a-zA-Z0-9]/g, '_');
 }
 
+// ── Identifier-column coloring ──────────────────────────────────────────────
+// Numeric columns get a blue → orange gradient scaled to the column's range;
+// string columns get one stable hue per distinct value.
+
+const GRAD_LO = [74, 154, 222];   // #4a9ade — theme blue
+const GRAD_HI = [230, 126, 34];   // #e67e22 — theme orange
+
+function lerpColor(t) {
+  const c = GRAD_LO.map((lo, i) => Math.round(lo + (GRAD_HI[i] - lo) * t));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+function isNumericVal(v) {
+  return v != null && v !== '' && Number.isFinite(Number(v));
+}
+
+// One style descriptor per field: {type:'numeric',min,max} or {type:'categorical',colors:Map}
+function computeFieldStyles(fields, files, charMap) {
+  const styles = {};
+  for (const field of fields) {
+    const vals = files
+      .map(f => (charMap.get(f.path) || {})[field])
+      .filter(v => v != null && v !== '');
+    if (!vals.length) { styles[field] = null; continue; }
+
+    if (vals.every(isNumericVal)) {
+      const nums = vals.map(Number);
+      styles[field] = { type: 'numeric', min: Math.min(...nums), max: Math.max(...nums) };
+    } else {
+      // Distinct values in sorted order → deterministic hues, spread via the
+      // golden angle so neighboring categories stay distinguishable.
+      const uniq = [...new Set(vals.map(String))].sort();
+      const colors = new Map();
+      uniq.forEach((v, i) => {
+        colors.set(v, `hsl(${Math.round((i * 137.5) % 360)}, 55%, 65%)`);
+      });
+      styles[field] = { type: 'categorical', colors };
+    }
+  }
+  return styles;
+}
+
+function idCellHtml(value, style, suffix = '') {
+  if (value == null || value === '') return '—';
+  const disp = (typeof value === 'number' ? fmtNum(value) : value) + suffix;
+  if (!style) return `${disp}`;
+  let color;
+  if (style.type === 'numeric') {
+    const t = style.max > style.min ? (Number(value) - style.min) / (style.max - style.min) : 0.5;
+    color = lerpColor(t);
+  } else {
+    color = style.colors.get(String(value)) ?? 'var(--text-muted)';
+  }
+  return `<span class="lab-id-chip" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent);">${disp}</span>`;
+}
+
 export function EisLabView(container, { navigate, showToast }) {
   const fitCache      = new Map();  // cacheKey → FitResult
   const spectrumCache = new Map();  // path → { frequencies, z_real, z_imag }
@@ -51,6 +107,11 @@ export function EisLabView(container, { navigate, showToast }) {
   let _abortCtrl = null;
   let _gen       = 0;      // bumped on every selection change / onLeave to drop stale async
   let _active    = false;  // view currently shown? (guards the characterization fetch)
+
+  // Table sorting + last displayed lab fit (for "set as circuit fit")
+  let _sortField = null;   // '__file' | '__mape' | '__circuit' | <char field> | null = load order
+  let _sortDir   = 1;      // 1 asc, -1 desc
+  let _lastShown = null;   // { path, result } of the lab fit currently on screen
 
   // Modal state
   let _modalEditor = null;   // handle from mountCircuitEditor
@@ -65,6 +126,39 @@ export function EisLabView(container, { navigate, showToast }) {
   }
 
   function cards() { return getState().labCircuits ?? []; }
+
+  // The fit currently "attached" to a file: a lab fit the user pinned wins,
+  // otherwise the file's result from the last batch run.
+  function attachedFitFor(path) {
+    const lab = getState().labFits?.[path];
+    if (lab?.success) return { ...lab, _source: 'lab' };
+    const batch = (getState().fitResults || []).find(r => r?.path === path && r.success);
+    return batch ? { ...batch, _source: 'batch' } : null;
+  }
+
+  // Files in the order the table displays them (respects the active sort)
+  function sortedFiles() {
+    const fs = [...files()];
+    if (!_sortField) return fs;
+    const val = f => {
+      if (_sortField === '__file')    return f.filename;
+      if (_sortField === '__mape')    return attachedFitFor(f.path)?.residual ?? null;
+      if (_sortField === '__circuit') return attachedFitFor(f.path)?.circuit_used ?? null;
+      return (charMap.get(f.path) || {})[_sortField] ?? null;
+    };
+    fs.sort((a, b) => {
+      const va = val(a), vb = val(b);
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;    // missing values sink to the bottom either way
+      if (vb == null) return -1;
+      const na = Number(va), nb = Number(vb);
+      const cmp = Number.isFinite(na) && Number.isFinite(nb)
+        ? na - nb
+        : String(va).localeCompare(String(vb));
+      return _sortDir * cmp;
+    });
+    return fs;
+  }
 
   function charFields() {
     const fields = new Set();
@@ -147,7 +241,7 @@ export function EisLabView(container, { navigate, showToast }) {
     container.innerHTML = `
       <div class="section-header">EIS Lab</div>
       <div class="section-sub">Try circuits on one file at a time — the fit runs as soon as you pick one.
-        <span class="lab-key-hint">⌨ ↑/↓ file &nbsp;·&nbsp; ←/→ circuit</span></div>
+        <span class="lab-key-hint">⌨ ↑/↓ file &nbsp;·&nbsp; ←/→ circuit &nbsp;·&nbsp; Enter = set as circuit fit</span></div>
 
       <div class="lab-main">
         <div class="lab-sidebar">
@@ -178,6 +272,12 @@ export function EisLabView(container, { navigate, showToast }) {
             <span id="lab-circuit-label" style="font-family:monospace;font-size:13px;color:var(--accent);"></span>
             <span class="residual-badge" id="lab-badge" style="display:none;"></span>
             <span id="lab-status" style="font-size:12px;color:var(--text-muted);"></span>
+            <span style="margin-left:auto;display:inline-flex;gap:6px;flex-shrink:0;">
+              <button class="btn btn-secondary btn-sm" id="lab-attach-btn" style="display:none;"
+                      title="Attach this lab fit to the file as its circuit fit (overrides the batch fit in the table and plot)">📌 Set as circuit fit</button>
+              <button class="btn btn-ghost btn-sm" id="lab-revert-btn" style="display:none;"
+                      title="Remove the attached lab fit — the batch fit becomes the circuit fit again">↩ Batch fit</button>
+            </span>
           </div>
           <div class="lab-plot" id="lab-plot"></div>
           <div class="params-summary" id="lab-params"></div>
@@ -189,26 +289,47 @@ export function EisLabView(container, { navigate, showToast }) {
           <thead>
             <tr>
               <th style="width:32px;">#</th>
-              <th>File</th>
-              ${fields.map(f => `<th>${f}</th>`).join('')}
-              <th>Batch circuit</th>
+              ${(() => {
+                const th = (key, label) => {
+                  const active = _sortField === key;
+                  const arrow  = active ? (_sortDir === 1 ? '↑' : '↓') : '↕';
+                  return `<th class="sortable${active ? ' sorted' : ''}" data-sortkey="${key}"
+                              title="Sort by ${label}">${label} <span class="sort-arrow">${arrow}</span></th>`;
+                };
+                return th('__file', 'File')
+                  + fields.map(f => th(f, f)).join('')
+                  + th('__mape', 'MAPE')
+                  + th('__circuit', 'Circuit fit');
+              })()}
             </tr>
           </thead>
           <tbody>
-            ${fs.map((f, i) => {
-              const char = charMap.get(f.path) || {};
-              const saved = state.fileConfigs?.[f.path]?.circuitConfig?.circuit_string;
-              return `
-              <tr class="lab-file-row ${f.path === path ? 'selected' : ''}" data-path="${f.path}" id="lab-row-${pathToSafeId(f.path)}">
-                <td style="color:var(--text-muted);">${i + 1}</td>
-                <td>${f.filename}</td>
-                ${fields.map(k => {
-                  const v = char[k];
-                  return `<td>${v == null ? '—' : (typeof v === 'number' ? fmtNum(v) : v)}</td>`;
-                }).join('')}
-                <td style="font-family:monospace;font-size:11px;color:var(--text-muted);">${saved ?? '—'}</td>
-              </tr>`;
-            }).join('')}
+            ${(() => {
+              const displayFs   = sortedFiles();
+              const fieldStyles = computeFieldStyles(fields, displayFs, charMap);
+              // MAPE gets the same blue→orange numeric gradient as identifiers
+              const mapes = displayFs.map(f => attachedFitFor(f.path)?.residual)
+                                     .filter(v => v != null).map(v => v * 100);
+              const mapeStyle = mapes.length
+                ? { type: 'numeric', min: Math.min(...mapes), max: Math.max(...mapes) } : null;
+              return displayFs.map((f, i) => {
+                const char = charMap.get(f.path) || {};
+                const att  = attachedFitFor(f.path);
+                const isLab = att?._source === 'lab';
+                const mape = att?.residual != null ? att.residual * 100 : null;
+                return `
+                <tr class="lab-file-row ${f.path === path ? 'selected' : ''}" data-path="${f.path}" id="lab-row-${pathToSafeId(f.path)}">
+                  <td style="color:var(--text-muted);">${i + 1}</td>
+                  <td>${f.filename}</td>
+                  ${fields.map(k => `<td>${idCellHtml(char[k], fieldStyles[k])}</td>`).join('')}
+                  <td>${idCellHtml(mape != null ? Number(mape.toFixed(2)) : null, mapeStyle, '%')}</td>
+                  <td style="font-family:monospace;font-size:11px;color:${isLab ? 'var(--accent)' : 'var(--text-muted)'};"
+                      title="${isLab ? 'Attached from EIS Lab' : att ? 'From batch fit' : 'No fit yet'}">
+                    ${att?.circuit_used ?? '—'}${isLab ? ' 📌' : ''}
+                  </td>
+                </tr>`;
+              }).join('');
+            })()}
           </tbody>
         </table>
       </div>
@@ -252,6 +373,31 @@ export function EisLabView(container, { navigate, showToast }) {
     container.querySelector('#lab-add-btn').addEventListener('click', () => openModal(null));
     container.querySelectorAll('.lab-file-row').forEach(row => {
       row.addEventListener('click', () => selectFile(row.dataset.path));
+    });
+    container.querySelectorAll('th.sortable').forEach(thEl => {
+      thEl.addEventListener('click', () => {
+        const key = thEl.dataset.sortkey;
+        if (_sortField === key) {
+          if (_sortDir === 1) _sortDir = -1;
+          else { _sortField = null; _sortDir = 1; }   // third click restores load order
+        } else {
+          _sortField = key; _sortDir = 1;
+        }
+        render(); update();
+      });
+    });
+    container.querySelector('#lab-attach-btn').addEventListener('click', () => {
+      if (!_lastShown?.result?.success) return;
+      setState({ labFits: { ...(getState().labFits ?? {}), [_lastShown.path]: _lastShown.result } });
+      showToast('Lab fit attached as this file\'s circuit fit.', 'success');
+      render(); update();
+    });
+    container.querySelector('#lab-revert-btn').addEventListener('click', () => {
+      const lf = { ...(getState().labFits ?? {}) };
+      delete lf[selectedPath()];
+      setState({ labFits: lf });
+      showToast('Reverted to the batch fit.', 'info');
+      render(); update();
     });
 
     // Modal wiring
@@ -389,7 +535,7 @@ export function EisLabView(container, { navigate, showToast }) {
   }
 
   function stepFile(dir) {
-    const fs = files();
+    const fs = sortedFiles();   // arrow keys walk the table's displayed order
     const idx = fs.findIndex(f => f.path === selectedPath());
     const next = Math.min(fs.length - 1, Math.max(0, idx + dir));
     if (next !== idx) selectFile(fs[next].path);
@@ -417,6 +563,11 @@ export function EisLabView(container, { navigate, showToast }) {
     else if (e.key === 'ArrowUp')    { e.preventDefault(); stepFile(-1); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); stepChip(1); }
     else if (e.key === 'ArrowLeft')  { e.preventDefault(); stepChip(-1); }
+    else if (e.key === 'Enter') {
+      // Enter pins the lab fit on screen as the file's circuit fit
+      const btn = container.querySelector('#lab-attach-btn');
+      if (btn && btn.style.display !== 'none' && !btn.disabled) { e.preventDefault(); btn.click(); }
+    }
   }
 
   // ── Fitting ────────────────────────────────────────────────────────────────
@@ -442,6 +593,8 @@ export function EisLabView(container, { navigate, showToast }) {
     if (!labelEl) return;
 
     fileLabel.textContent = files().find(f => f.path === path)?.filename ?? '';
+
+    syncAttachButtons(null);
 
     if (!chip) {
       labelEl.textContent = '';
@@ -521,12 +674,33 @@ export function EisLabView(container, { navigate, showToast }) {
     plotNyquist({ frequencies: spec.frequencies, z_real_data: spec.z_real, z_imag_data: spec.z_imag });
   }
 
+  // Show/hide the attach + revert buttons for the current selection.
+  // `shownResult` is the lab fit on screen (null when only the spectrum shows).
+  function syncAttachButtons(shownResult) {
+    const attachBtn = container.querySelector('#lab-attach-btn');
+    const revertBtn = container.querySelector('#lab-revert-btn');
+    if (!attachBtn) return;
+    const path = selectedPath();
+    _lastShown = shownResult?.success ? { path, result: shownResult } : null;
+
+    const attached = getState().labFits?.[path];
+    const isAttached = attached && shownResult &&
+      attached.circuit_used === shownResult.circuit_used &&
+      attached.residual === shownResult.residual;
+
+    attachBtn.style.display = shownResult?.success ? '' : 'none';
+    attachBtn.disabled = !!isAttached;
+    attachBtn.textContent = isAttached ? '✓ Circuit fit' : '📌 Set as circuit fit';
+    revertBtn.style.display = attached ? '' : 'none';
+  }
+
   function renderResult(result) {
     const statusEl = container.querySelector('#lab-status');
     const badgeEl  = container.querySelector('#lab-badge');
     const paramsEl = container.querySelector('#lab-params');
     if (!statusEl) return;
 
+    syncAttachButtons(result);
     statusEl.textContent = '';
     badgeEl.style.display = '';
     if (result.success) {
@@ -566,9 +740,21 @@ export function EisLabView(container, { navigate, showToast }) {
     if (result.z_real_fit?.length) {
       traces.push({
         x: result.z_real_fit, y: result.z_imag_fit.map(v => -v),
-        mode: 'lines', name: 'Fit',
+        mode: 'lines', name: 'Lab fit',
         line: { color: '#64dc96', width: 2 },
-        hovertemplate: "Z'=%{x:.4g} Ω<br>-Z''=%{y:.4g} Ω<extra></extra>",
+        hovertemplate: "Lab fit<br>Z'=%{x:.4g} Ω<br>-Z''=%{y:.4g} Ω<extra></extra>",
+      });
+    }
+    // Overlay the file's attached circuit fit (pinned lab fit, else batch fit)
+    // so lab experiments can be compared against it.
+    const att = attachedFitFor(selectedPath());
+    if (att?.z_real_fit?.length) {
+      const label = `${att._source === 'lab' ? '📌 Circuit fit' : 'Batch fit'}${att.circuit_used ? ` — ${att.circuit_used}` : ''}`;
+      traces.push({
+        x: att.z_real_fit, y: att.z_imag_fit.map(v => -v),
+        mode: 'lines', name: label,
+        line: { color: '#e67e22', width: 2, dash: 'dash' },
+        hovertemplate: `${label}<br>Z'=%{x:.4g} Ω<br>-Z''=%{y:.4g} Ω<extra></extra>`,
       });
     }
     Plotly.newPlot(el, traces, {
