@@ -5,7 +5,16 @@ export function TrendsView(container, { navigate, showToast }) {
 
   function render() {
     const state = getState();
-    const results = (state.fitResults || []).filter(r => r.success);
+    // Each file's "circuit fit" feeds the trends: a lab fit pinned in the EIS
+    // Lab overrides that file's batch result; files only ever fitted in the
+    // lab (no batch run) are included too.
+    const labFits = state.labFits || {};
+    const merged = (state.fitResults || []).map(r =>
+      labFits[r?.path]?.success ? labFits[r.path] : r);
+    for (const [path, lf] of Object.entries(labFits)) {
+      if (lf?.success && !merged.some(r => r?.path === path)) merged.push(lf);
+    }
+    const results = merged.filter(r => r?.success);
 
     if (!results.length) {
       container.innerHTML = `
@@ -94,7 +103,13 @@ export function TrendsView(container, { navigate, showToast }) {
     const xOptions = charLabels.length ? charLabels : ['File index'];
 
     const state2 = getState();
-    const savedX        = (state2._trendsX && xOptions.includes(state2._trendsX)) ? state2._trendsX : xOptions[0];
+    // Defaults: battery_id colors the lines, and the x axis takes the first
+    // other characterization key (x and group-by must differ).
+    const savedGroupBy  = (state2._trendsGroupBy && charLabels.includes(state2._trendsGroupBy))
+      ? state2._trendsGroupBy
+      : (charLabels.includes('battery_id') ? 'battery_id' : charLabels[0]);
+    const defaultX      = xOptions.find(o => o !== savedGroupBy) ?? xOptions[0];
+    const savedX        = (state2._trendsX && xOptions.includes(state2._trendsX)) ? state2._trendsX : defaultX;
     const savedY        = state2._trendsY || paramNames.slice(0, Math.min(paramNames.length, 4));
     const charUnits     = state2.charUnits || {};
 
@@ -102,7 +117,7 @@ export function TrendsView(container, { navigate, showToast }) {
     // Derive from the result's own path — index alignment with state.files
     // breaks when a stopped run leaves gaps in fitResults.
     const batteryLabels = {};
-    (state2.fitResults || []).forEach(r => {
+    results.forEach(r => {
       const bid = r.characterization?.battery_id;
       if (bid != null && r.path) {
         const parts = String(r.path).replace(/\\/g, '/').split('/');
@@ -112,9 +127,6 @@ export function TrendsView(container, { navigate, showToast }) {
     });
     const savedBoxMode  = state2._trendsBoxMode !== false; // default true
     const savedConf     = state2._trendsConf    === true;  // default false
-    const savedGroupBy  = (state2._trendsGroupBy && charLabels.includes(state2._trendsGroupBy))
-      ? state2._trendsGroupBy
-      : (charLabels.includes('battery_id') ? 'battery_id' : charLabels[0]);
     const savedSection  = state2._trendsSection  ?? 'none';
 
     container.innerHTML = `
