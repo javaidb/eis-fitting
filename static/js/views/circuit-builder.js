@@ -884,8 +884,14 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
             criterion:  container.querySelector('input[name="criterion"]:checked')?.value || 'AIC',
             n_restarts: Math.max(1, parseInt(container.querySelector('#n-restarts')?.value) || 1),
           };
-          // Persist circuit string (frame) from whatever was last built, even if empty.
-          const str = treeToString(nodes);
+          // The optimizer needs a non-empty frame (variants are built around it) —
+          // default to a bare series resistance when nothing was drawn.
+          let str = treeToString(nodes);
+          if (!str) {
+            str = 'R0';
+            nodes = stringToTree(str);
+            showToast('No circuit drawn — using "R0" as the series frame for optimization.', 'info');
+          }
           setState({ circuitTree: { nodes }, circuitString: str, optimizeConfig });
           navigate('bounds');
         } else {
