@@ -38,6 +38,7 @@ const _defaults = {
   fileConfigs: {},         // path → per-file fit config snapshot from the last batch run that included it
   labCircuit: null,        // selected EIS Lab card id (or '__batch__'), sticky across files
   labSelectedPath: null,   // file currently open in the EIS Lab
+  labFits: {},             // path → lab FitResult attached as the file's "circuit fit" (overrides batch)
   labCircuits: [           // editable named circuit cards shown in the EIS Lab
     { id: 'rc',        name: 'R + RC',          circuit: 'R0-p(R1,C1)' },
     { id: 'rq',        name: 'R + RQ',          circuit: 'R0-p(R1,CPE1)' },
