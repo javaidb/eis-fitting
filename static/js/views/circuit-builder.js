@@ -872,7 +872,7 @@ export function CircuitBuilderView(container, { navigate, showToast }) {
       container.querySelector('#mode-fixed-btn').addEventListener('click',    () => setMode('fixed'));
       container.querySelector('#mode-optimize-btn').addEventListener('click', () => setMode('optimize'));
 
-      container.querySelector('#back-btn').addEventListener('click', () => navigate(3));
+      container.querySelector('#back-btn').addEventListener('click', () => navigate('drt'));
       container.querySelector('#next-btn').addEventListener('click', () => {
         if (currentMode === 'optimize') {
           const pairTypes = [...container.querySelectorAll('.pair-type-check:checked')].map(el => el.value);
