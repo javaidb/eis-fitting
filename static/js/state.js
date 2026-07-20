@@ -33,7 +33,7 @@ const _defaults = {
   kkData: {},     // path → { freqMin, freqMax, rsEst, M, mu, flaggedFreqs } from last KK run
   kkResults: [],  // full KKResult list — survives navigation so tiles keep their KK badges
   fitting: false,
-  fitSubTab: 'batch',      // active sub-tab inside the Fit step: 'batch' | 'lab'
+  fitSubTab: 'batch',      // active sub-tab inside the Fit step: 'batch' | 'lab' | 'drt'
   batchSection: 'circuit', // active section inside Batch Fitting: 'circuit' | 'bounds' | 'run'
   fileConfigs: {},         // path → per-file fit config snapshot from the last batch run that included it
   labCircuit: null,        // selected EIS Lab card id (or '__batch__'), sticky across files
@@ -51,7 +51,7 @@ const _defaults = {
     { id: 'l-rq2',     name: 'L + R + 2×RQ',    circuit: 'L0-R0-p(R1,CPE1)-p(R2,CPE2)' },
     { id: 'rq2-ws',    name: '2×RQ + Ws',       circuit: 'R0-p(R1,CPE1)-p(R2,CPE2)-Ws1' },
   ],
-  _sv: 3,           // schema version — bump when step numbering changes
+  _sv: 4,           // schema version — bump when step numbering changes
 };
 
 let _state = { ..._defaults };
@@ -86,16 +86,25 @@ function _load() {
         parsed.maxStep = mapStep(parsed.maxStep ?? 1);
         parsed._sv = 3;
       }
+      // Migration to schema v4: DRT moved from step 3 into a Fit sub-tab —
+      // Fit is now step 3, Trends step 4.
+      if (parsed._sv < 4) {
+        if (parsed.step === 3) parsed.fitSubTab = 'drt';   // was on the DRT step
+        const mapStep = n => (n >= 5 ? 4 : n >= 4 ? 3 : n);
+        parsed.step    = mapStep(parsed.step ?? 1);
+        parsed.maxStep = mapStep(parsed.maxStep ?? 1);
+        parsed._sv = 4;
+      }
       _state = { ..._defaults, ...parsed, fitting: false };
 
       // Defensive: ensure maxStep is never lower than what saved data implies.
       // Guards against half-migrated states or in-dev schema bumps.
-      if (_state.fitResults?.length)  _state.maxStep = Math.max(_state.maxStep, 5);
-      if (_state.circuitConfig)        _state.maxStep = Math.max(_state.maxStep, 4);
-      if (_state.circuitString)        _state.maxStep = Math.max(_state.maxStep, 4);
+      if (_state.fitResults?.length)  _state.maxStep = Math.max(_state.maxStep, 4);
+      if (_state.circuitConfig)        _state.maxStep = Math.max(_state.maxStep, 3);
+      if (_state.circuitString)        _state.maxStep = Math.max(_state.maxStep, 3);
       if (_state.columnMap)            _state.maxStep = Math.max(_state.maxStep, 3);
       if (_state.files?.length)        _state.maxStep = Math.max(_state.maxStep, 2);
-      _state.maxStep = Math.min(_state.maxStep, 5);
+      _state.maxStep = Math.min(_state.maxStep, 4);
       _state.step    = Math.min(_state.step, _state.maxStep);
     }
   } catch (_) { /* ignore */ }
