@@ -1636,7 +1636,7 @@ select option { background: var(--surface2); }
   display: flex;
   gap: 16px;
   align-items: stretch;
-  min-height: 480px;
+  min-height: 320px;
 }
 .lab-sidebar {
   flex: 0 0 210px;
@@ -1699,7 +1699,7 @@ select option { background: var(--surface2); }
 }
 .lab-plot {
   flex: 1;
-  min-height: 380px;
+  min-height: 260px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -1721,21 +1721,24 @@ select option { background: var(--surface2); }
 
 /* Full-height lab: the Fit view becomes a flex column while the Lab sub-tab is
    active, so the file table stretches to the bottom edge of the page. */
-#view-4.active:has(#fit-sub-lab.active) {
+#view-3.active:has(#fit-sub-lab.active) {
   display: flex;
   flex-direction: column;
 }
-#view-4 .fit-subtab-bar { flex-shrink: 0; }
+#view-3 .fit-subtab-bar { flex-shrink: 0; }
 #fit-sub-lab.active {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
 }
-#fit-sub-lab .lab-main { flex: 0 0 auto; }
+/* Plot row and file table share the remaining height; the circuit sidebar
+   scrolls internally instead of stretching the page. */
+#fit-sub-lab .lab-main { flex: 1 1 0; min-height: 0; }
+#fit-sub-lab .lab-main .lab-sidebar { max-height: none; }
 #fit-sub-lab .lab-file-table-wrap {
-  flex: 1 1 auto;
-  min-height: 140px;
+  flex: 1 1 0;
+  min-height: 120px;
 }
 .lab-file-table { width: 100%; }
 .lab-file-table thead th {
@@ -1915,4 +1918,28 @@ select option { background: var(--surface2); }
   .mapper-preview .card { height: auto; }
   .mapper-preview .preview-file-list { max-height: 220px; flex: none; }
   .mapper-preview .preview-plot { height: 340px; flex: none; }
+}
+
+/* Single forward control: the header's blue "Next →" (top right) is the only
+   visible way to advance. Per-view Next buttons stay in the DOM — they carry
+   each step's validation + state-commit logic and the header button proxies
+   clicks to them — but are never shown. */
+.view #next-btn { display: none !important; }
+
+/* DRT as a Fit sub-tab — exact viewport fit via the same flex chain as the lab
+   (the old calc(100vh - 230px) height didn't account for the sub-tab bar) */
+#view-3.active:has(#fit-sub-drt.active) {
+  display: flex;
+  flex-direction: column;
+}
+#fit-sub-drt.active {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+#fit-sub-drt .drt-lab {
+  flex: 1;
+  min-height: 320px;
+  height: auto;   /* flex sizing replaces the fixed calc height */
 }
