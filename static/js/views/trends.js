@@ -23,7 +23,7 @@ export function TrendsView(container, { navigate, showToast }) {
           <div>Run fitting first to see parameter trends.</div>
           <button class="btn btn-secondary" style="margin-top:12px;" id="back-btn">← Back to Fitting</button>
         </div>`;
-      container.querySelector('#back-btn')?.addEventListener('click', () => navigate(4));
+      container.querySelector('#back-btn')?.addEventListener('click', () => navigate(3));
       return;
     }
 
@@ -191,7 +191,7 @@ export function TrendsView(container, { navigate, showToast }) {
 
     updateBtn.addEventListener('click', updatePlots);
     exportBtn.addEventListener('click', exportCSV);
-    backBtn.addEventListener('click', () => navigate(4));
+    backBtn.addEventListener('click', () => navigate(3));
 
     updatePlots();
 
