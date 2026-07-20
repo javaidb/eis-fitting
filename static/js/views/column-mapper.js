@@ -245,7 +245,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
       <div class="step-actions">
         <button class="btn btn-secondary" id="back-btn">← Back</button>
         <div class="spacer"></div>
-        <button class="btn btn-primary" id="next-btn">Next: DRT →</button>
+        <button class="btn btn-primary" id="next-btn">Next: Fit →</button>
       </div>
 
       </div><!-- /mapper-main -->
@@ -357,7 +357,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
         columnMap: { frequency, real_z, imag_z, negate_imag, skip_first_data_row, characterization, per_battery_characterization },
         charUnits: newCharUnits,
         charDecimalPlaces: newCharDecimalPlaces,
-        maxStep: Math.max(getState().maxStep, 4),
+        maxStep: Math.max(getState().maxStep, 3),
       });
       navigate(3);
     });
