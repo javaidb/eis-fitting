@@ -180,7 +180,7 @@ export function DRTView(container, { navigate, showToast }) {
     `;
 
     container.querySelector('#back-btn').addEventListener('click', () => navigate(2));
-    container.querySelector('#next-btn').addEventListener('click', () => navigate(4));
+    container.querySelector('#next-btn').addEventListener('click', () => navigate('circuit'));
     container.querySelector('#drt-refresh-btn')?.addEventListener('click', refreshAll);
     container.querySelector('#drt-mode-select')?.addEventListener('change', e => {
       // Kernel change invalidates every cached spectrum — recompute all files.
