@@ -325,7 +325,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
     `;
 
     container.querySelector('#back-btn').addEventListener('click', () => navigate('bounds'));
-    container.querySelector('#next-btn').addEventListener('click', () => navigate(5));
+    container.querySelector('#next-btn').addEventListener('click', () => navigate(4));
     container.querySelector('#run-btn').addEventListener('click', () => runFitting());
     container.querySelector('#retry-btn')?.addEventListener('click', () => runFitting({ retryFailedOnly: true }));
     container.querySelector('#stop-btn').addEventListener('click', stopFitting);
@@ -1059,7 +1059,7 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         fitResults:  merged,
         fileConfigs,
         fitCacheKey: (!stopped && gotDone) ? runCacheKey : null,
-        maxStep:     Math.max(state.maxStep, 5),
+        maxStep:     Math.max(state.maxStep, 4),
       });
       // Only touch the DOM if we are still in the same view session.
       // If the user left and came back, onEnter already rendered a fresh view;
