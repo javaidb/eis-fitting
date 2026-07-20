@@ -1,7 +1,6 @@
 import { getState, setState, subscribe } from './state.js';
 import { FileLoaderView }    from './views/file-loader.js';
 import { ColumnMapperView }  from './views/column-mapper.js';
-import { DRTView }           from './views/drt-viewer.js';
 import { FitView }           from './views/fit-view.js';
 import { TrendsView }        from './views/trends.js';
 
@@ -19,9 +18,8 @@ export function showToast(message, type = 'info') {
 const VIEWS = [
   { step: 1, el: document.getElementById('view-1'), factory: FileLoaderView },
   { step: 2, el: document.getElementById('view-2'), factory: ColumnMapperView },
-  { step: 3, el: document.getElementById('view-3'), factory: DRTView },
-  { step: 4, el: document.getElementById('view-4'), factory: FitView },
-  { step: 5, el: document.getElementById('view-5'), factory: TrendsView },
+  { step: 3, el: document.getElementById('view-3'), factory: FitView },
+  { step: 4, el: document.getElementById('view-4'), factory: TrendsView },
 ];
 
 const instances = {};
@@ -30,22 +28,22 @@ VIEWS.forEach(({ step, el, factory }) => {
 });
 
 // ── Navigation ───────────────────────────────────────────────────
-const STEP_LABELS = { 1: 'Load Files', 2: 'Map Columns', 3: 'DRT', 4: 'Fit', 5: 'Trends' };
+const STEP_LABELS = { 1: 'Load Files', 2: 'Map Columns', 3: 'Fit', 4: 'Trends' };
 const globalNextBtn = document.getElementById('global-next-btn');
 
 function updateGlobalNext(step) {
-  if (step >= 5) { globalNextBtn.style.display = 'none'; return; }
+  if (step >= 4) { globalNextBtn.style.display = 'none'; return; }
   globalNextBtn.style.display = '';
   // The Fit step advances through its own internal sections, so a fixed
   // "Next: <label>" would be misleading there.
-  globalNextBtn.textContent = step === 4 ? 'Next →' : `Next: ${STEP_LABELS[step + 1]} →`;
+  globalNextBtn.textContent = step === 3 ? 'Next →' : `Next: ${STEP_LABELS[step + 1]} →`;
 }
 
 // Proxy to the active view's own Next button so per-step validation and
 // state commits (e.g. Map Columns building the columnMap) still run.
 globalNextBtn.addEventListener('click', () => {
   const step = getState().step;
-  if (step >= 5) return;
+  if (step >= 4) return;
   const view = VIEWS.find(v => v.step === step);
   // Composite views (Fit) expose the Next button of their active section.
   const inst = instances[step];
@@ -105,7 +103,7 @@ export function buildFilename(folderPath, ext) {
 function saveProject() {
   const s = getState();
   const project = {
-    version:            2,   // v2 = 5-step numbering (Fit merged), per-file configs
+    version:            3,   // v3 = 4-step numbering (DRT inside Fit)
     files:              s.files,
     discardedFiles:     s.discardedFiles,
     columnMap:          s.columnMap,
@@ -141,9 +139,10 @@ function loadProject(file) {
     try {
       const proj = JSON.parse(e.target.result);
       if (!proj.version) throw new Error('Not a valid EIS project file');
-      // v1 projects used 7-step numbering (Circuit 4 / Bounds 5 / Fit 6 / Trends 7).
+      // Normalize older step numbering: v1 was 7 steps, v2 was 5 (DRT separate).
       let maxStep = proj.maxStep ?? 1;
-      if (proj.version < 2) maxStep = maxStep >= 7 ? 5 : maxStep >= 4 ? 4 : maxStep;
+      if (proj.version < 2) maxStep = maxStep >= 7 ? 5 : maxStep >= 4 ? 4 : maxStep;   // v1 → v2
+      if (proj.version < 3) maxStep = maxStep >= 5 ? 4 : maxStep >= 4 ? 3 : maxStep;   // v2 → v3
       setState({
         files:              proj.files              ?? [],
         discardedFiles:     proj.discardedFiles     ?? [],
