@@ -8,6 +8,7 @@ import { parseCircuit, getSpectrum, streamFitting, characterizeFiles } from '../
 import { guessDefault } from './bounds-editor.js';
 import { mountCircuitEditor } from './circuit-builder.js';
 import { fmtNum, computeFieldStyles, idCellHtml } from '../table-colors.js';
+import { excludeFreqsForFit } from '../exclusions.js';
 
 const BATCH_CHIP = '__batch__';   // sentinel: use this file's saved batch config
 
@@ -129,7 +130,8 @@ export function EisLabView(container, { navigate, showToast }) {
     const extra = chip === BATCH_CHIP
       ? JSON.stringify(getState().fileConfigs?.[path]?.circuitConfig ?? null)
       : circuitStringFor(chip, path);
-    return `${path}::${chip}::${extra}::${settingsSig()}`;
+    const excl = JSON.stringify(getState().excludedPoints?.[path] ?? []);
+    return `${path}::${chip}::${extra}::${excl}::${settingsSig()}`;
   }
 
   async function circuitConfigFor(chip, path) {
@@ -565,7 +567,10 @@ export function EisLabView(container, { navigate, showToast }) {
         files: [{
           ...file,
           rs_estimate:   kk?.rsEst ?? null,
-          exclude_freqs: (state.excludeKKFlagged ?? true) && kk?.flaggedFreqs?.length ? kk.flaggedFreqs : null,
+          exclude_freqs: excludeFreqsForFit(
+            path,
+            (state.excludeKKFlagged ?? true) ? kk?.flaggedFreqs : null,
+          ),
         }],
         column_map:      { ...state.columnMap, decimal_places: state.charDecimalPlaces ?? {} },
         circuit_config:  circuitConfig,

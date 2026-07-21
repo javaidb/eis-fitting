@@ -30,6 +30,7 @@ const _defaults = {
   fitSolver: 'lm',
   omitInductive: false,
   excludeKKFlagged: true,  // drop KK-flagged (red) points from the fit
+  excludedPoints: {},  // path → [frequency, …] manually removed in the Map Columns preview
   kkData: {},     // path → { freqMin, freqMax, rsEst, M, mu, flaggedFreqs } from last KK run
   kkResults: [],  // full KKResult list — survives navigation so tiles keep their KK badges
   fitting: false,

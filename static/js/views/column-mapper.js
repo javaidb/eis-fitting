@@ -1,6 +1,7 @@
 import { getState, setState } from '../state.js';
 import { characterizeFiles, getSpectrum } from '../api.js';
 import { computeFieldStyles, idCellHtml } from '../table-colors.js';
+import { excludedFor, isExcluded, toggleFreqs, addFreqs, clearExcluded } from '../exclusions.js';
 
 export function ColumnMapperView(container, { navigate, showToast }) {
 
@@ -261,6 +262,17 @@ export function ColumnMapperView(container, { navigate, showToast }) {
           <div class="section-sub" style="font-size:12px;margin-bottom:8px;">
             Click a file (or use ↑/↓ to cycle) to preview its raw spectrum with the current mapping.
             ⊘ excludes a file from analysis without hiding it here.
+            <span style="display:block;margin-top:4px;">
+              In the plot, <strong>click a point</strong> to exclude it from fitting; drag with
+              <strong>Box select</strong> to exclude many. Excluded points show as red ✕.
+            </span>
+          </div>
+          <div class="preview-point-bar" id="preview-point-bar" style="display:none;">
+            <button class="btn btn-secondary btn-sm" id="point-select-btn"
+                    title="Toggle box-select mode — drag a box to exclude every point inside it">▣ Box select</button>
+            <span id="excluded-count" style="font-size:12px;color:var(--text-muted);"></span>
+            <button class="btn btn-ghost btn-sm" id="restore-points-btn"
+                    title="Restore every excluded point for this file">↺ Restore all</button>
           </div>
           <div class="preview-list-header" id="preview-list-header" style="display:none;"></div>
           <div class="preview-file-list" id="preview-file-list" tabindex="0">
@@ -532,18 +544,55 @@ export function ColumnMapperView(container, { navigate, showToast }) {
       };
     }
 
+    // Box-select mode persists across re-plots within this view session.
+    let _selectMode = false;
+
+    function updatePointBar(path) {
+      const bar = container.querySelector('#preview-point-bar');
+      if (!bar) return;
+      bar.style.display = path ? 'flex' : 'none';
+      if (!path) return;
+      const n = excludedFor(path).length;
+      const countEl = container.querySelector('#excluded-count');
+      if (countEl) countEl.textContent = n ? `${n} point${n === 1 ? '' : 's'} excluded` : 'No points excluded';
+      const restoreBtn = container.querySelector('#restore-points-btn');
+      if (restoreBtn) restoreBtn.style.visibility = n ? 'visible' : 'hidden';
+      const selBtn = container.querySelector('#point-select-btn');
+      if (selBtn) selBtn.classList.toggle('active', _selectMode);
+    }
+
     function plotPreview(spec, el) {
       if (typeof Plotly === 'undefined') {
         el.innerHTML = '<div class="preview-plot-empty">Plotly not loaded.</div>';
         return;
       }
       el.innerHTML = '';
+      const path     = _previewPath;
+      const excluded = excludedFor(path);
+      const idx      = spec.z_real.map((_, i) => i);
+      const keep     = idx.filter(i => !isExcluded(spec.frequencies[i], excluded));
+      const drop     = idx.filter(i =>  isExcluded(spec.frequencies[i], excluded));
+      const hover    = "%{text}<br>Z'=%{x:.4g} Ω<br>-Z''=%{y:.4g} Ω<extra></extra>";
+      const freqText = list => list.map(i => `${Number(spec.frequencies[i]).toPrecision(4)} Hz`);
+
       // Same format as the Nyquist data trace in the Fit tab.
       const traces = [{
-        x: spec.z_real, y: spec.z_imag.map(v => -v),
+        x: keep.map(i => spec.z_real[i]), y: keep.map(i => -spec.z_imag[i]),
         mode: 'markers', type: 'scatter', name: 'Data',
         marker: { color: '#8892b0', size: 5 },
+        customdata: keep.map(i => spec.frequencies[i]),
+        text: freqText(keep), hovertemplate: hover,
       }];
+      if (drop.length) {
+        traces.push({
+          x: drop.map(i => spec.z_real[i]), y: drop.map(i => -spec.z_imag[i]),
+          mode: 'markers', type: 'scatter', name: 'Excluded',
+          marker: { color: '#e05c5c', size: 9, symbol: 'x', line: { color: '#e05c5c', width: 2 } },
+          customdata: drop.map(i => spec.frequencies[i]),
+          text: drop.map(i => `${Number(spec.frequencies[i]).toPrecision(4)} Hz (excluded — click to restore)`),
+          hovertemplate: hover,
+        });
+      }
       const layout = {
         paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
         margin: { t: 8, r: 16, b: 48, l: 64 },
@@ -551,8 +600,30 @@ export function ColumnMapperView(container, { navigate, showToast }) {
         xaxis:  { title: "Z' (Ω)",  color: '#8892b0', gridcolor: '#2d3147', zeroline: false },
         yaxis:  { title: "-Z'' (Ω)", color: '#8892b0', gridcolor: '#2d3147', zeroline: false, scaleanchor: 'x', scaleratio: 1 },
         showlegend: false,
+        dragmode: _selectMode ? 'select' : 'zoom',
       };
       Plotly.newPlot(el, traces, layout, { displayModeBar: false, responsive: true });
+
+      // Click a point to toggle its exclusion; box-select to exclude a group.
+      el.on('plotly_click', ev => {
+        const freq = ev.points?.[0]?.customdata;
+        if (freq == null) return;
+        toggleFreqs(path, [freq]);
+        updatePointBar(path);
+        plotPreview(spec, el);
+      });
+      el.on('plotly_selected', ev => {
+        const freqs = (ev?.points || [])
+          .filter(p => p.data.name === 'Data')     // already-excluded points stay excluded
+          .map(p => p.customdata)
+          .filter(f => f != null);
+        if (!freqs.length) return;
+        addFreqs(path, freqs);
+        updatePointBar(path);
+        plotPreview(spec, el);
+      });
+
+      updatePointBar(path);
     }
 
     async function showPreview(path, { force = false } = {}) {
@@ -565,6 +636,7 @@ export function ColumnMapperView(container, { navigate, showToast }) {
       const cm = currentEisMapping();
       if (!cm.frequency || !cm.real_z || !cm.imag_z) {
         plotEl.innerHTML = '<div class="preview-plot-empty">Select Frequency, Z′ and Z″ columns first, then click a file (or ↻ Refresh).</div>';
+        updatePointBar(null);
         return;
       }
 
@@ -623,6 +695,21 @@ export function ColumnMapperView(container, { navigate, showToast }) {
       loadCharValues();
       const path = _previewPath ?? previewFiles()[0]?.path;
       if (path) showPreview(path, { force: true });
+    });
+
+    container.querySelector('#point-select-btn').addEventListener('click', () => {
+      _selectMode = !_selectMode;
+      const plotEl = container.querySelector('#preview-plot');
+      // Flip the drag mode in place — no need to rebuild the plot
+      if (plotEl?.data) Plotly.relayout(plotEl, { dragmode: _selectMode ? 'select' : 'zoom' });
+      updatePointBar(_previewPath);
+    });
+
+    container.querySelector('#restore-points-btn').addEventListener('click', () => {
+      if (!_previewPath) return;
+      clearExcluded(_previewPath);
+      showPreview(_previewPath);
+      showToast('All points restored for this file.', 'success');
     });
 
     // Header clicks: asc → desc → back to path order

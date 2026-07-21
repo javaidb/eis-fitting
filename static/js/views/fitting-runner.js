@@ -1,6 +1,7 @@
 import { getState, setState } from '../state.js';
 import { characterizeFiles, streamFitting, streamKK } from '../api.js';
 import { guessDefault } from './bounds-editor.js';
+import { excludeFreqsForFit } from '../exclusions.js';
 
 const GOOD_THRESHOLD = 0.05;
 
@@ -64,6 +65,7 @@ function configKey(state) {
     omitInductive:    state.omitInductive ?? false,
     excludeKKFlagged: state.excludeKKFlagged ?? true,
     kkData:           state.kkData ?? {},  // flagged points change the fit — invalidate cache when KK reruns
+    excluded:         state.excludedPoints ?? {},  // ditto for hand-removed points
   });
 }
 
@@ -988,7 +990,12 @@ export function FittingRunnerView(container, { navigate, showToast }) {
         return {
           ...f,
           rs_estimate:   kk?.rsEst ?? null,
-          exclude_freqs: excludeKKFlagged && kk?.flaggedFreqs?.length ? kk.flaggedFreqs : null,
+          // Points removed by hand in the Map Columns preview always apply;
+          // KK-flagged points only when that option is ticked.
+          exclude_freqs: excludeFreqsForFit(
+            f.path,
+            excludeKKFlagged ? kk?.flaggedFreqs : null,
+          ),
         };
       });
 

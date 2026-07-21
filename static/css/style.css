@@ -1943,3 +1943,17 @@ select option { background: var(--surface2); }
   min-height: 320px;
   height: auto;   /* flex sizing replaces the fixed calc height */
 }
+
+/* Map Columns — point-exclusion toolbar under the Nyquist preview */
+.preview-point-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.preview-point-bar .btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
