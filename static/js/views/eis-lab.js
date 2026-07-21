@@ -545,7 +545,7 @@ export function EisLabView(container, { navigate, showToast }) {
 
     const key = cacheKey(path, chip);
     if (fitCache.has(key)) {
-      renderResult(fitCache.get(key));
+      await renderResult(fitCache.get(key), myGen);
       return;
     }
 
@@ -586,7 +586,7 @@ export function EisLabView(container, { navigate, showToast }) {
       if (_gen !== myGen) return;
       if (!result) throw new Error('No result returned');
       fitCache.set(key, result);
-      renderResult(result);
+      await renderResult(result, myGen);
     } catch (err) {
       if (err.name === 'AbortError' || _gen !== myGen) return;
       statusEl.textContent = '';
@@ -597,16 +597,21 @@ export function EisLabView(container, { navigate, showToast }) {
     }
   }
 
-  async function showSpectrumOnly(path, myGen) {
+  async function ensureSpectrum(path) {
     let spec = spectrumCache.get(path);
     if (!spec) {
       try {
         spec = await getSpectrum({ path, column_map: getState().columnMap });
         spectrumCache.set(path, spec);
-      } catch (_) { return; }
+      } catch (_) { return null; }
     }
-    if (_gen !== myGen) return;
-    plotNyquist({ frequencies: spec.frequencies, z_real_data: spec.z_real, z_imag_data: spec.z_imag });
+    return spec;
+  }
+
+  async function showSpectrumOnly(path, myGen) {
+    const spec = await ensureSpectrum(path);
+    if (!spec || _gen !== myGen) return;
+    plotNyquist({}, spec);
   }
 
   // Show/hide the attach + revert buttons for the current selection.
@@ -629,7 +634,7 @@ export function EisLabView(container, { navigate, showToast }) {
     revertBtn.style.display = attached ? '' : 'none';
   }
 
-  function renderResult(result) {
+  async function renderResult(result, myGen) {
     const statusEl = container.querySelector('#lab-status');
     const badgeEl  = container.querySelector('#lab-badge');
     const paramsEl = container.querySelector('#lab-params');
@@ -655,20 +660,33 @@ export function EisLabView(container, { navigate, showToast }) {
         return `<span>${k}</span>${disp}${unit ? ' ' + unit : ''}`;
       }).join(' &nbsp; ');
 
-    plotNyquist(result);
+    // A failed fit carries no data arrays — fall back to the measured
+    // spectrum so the Nyquist plot still shows what was being fitted.
+    if (result.z_real_data?.length) {
+      plotNyquist(result);
+    } else {
+      const spec = await ensureSpectrum(selectedPath());
+      if (myGen != null && _gen !== myGen) return;
+      plotNyquist(result, spec);
+    }
   }
 
-  function plotNyquist(result) {
+  // `spec` (optional) supplies the measured points when the result has none.
+  function plotNyquist(result, spec = null) {
     const el = container.querySelector('#lab-plot');
     if (!el || typeof Plotly === 'undefined') return;
 
+    const dataReal  = result.z_real_data?.length ? result.z_real_data : spec?.z_real;
+    const dataImag  = result.z_real_data?.length ? result.z_imag_data : spec?.z_imag;
+    const dataFreqs = result.z_real_data?.length ? result.frequencies  : spec?.frequencies;
+
     const traces = [];
-    if (result.z_real_data?.length) {
+    if (dataReal?.length) {
       traces.push({
-        x: result.z_real_data, y: result.z_imag_data.map(v => -v),
+        x: dataReal, y: dataImag.map(v => -v),
         mode: 'markers', name: 'Data',
         marker: { color: '#4a9ade', size: 6 },
-        text: (result.frequencies || []).map(f => f != null ? `${Number(f).toPrecision(4)} Hz` : ''),
+        text: (dataFreqs || []).map(f => f != null ? `${Number(f).toPrecision(4)} Hz` : ''),
         hovertemplate: "%{text}<br>Z'=%{x:.4g} Ω<br>-Z''=%{y:.4g} Ω<extra></extra>",
       });
     }
